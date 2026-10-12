@@ -295,8 +295,8 @@ kubectl get dnsrecord -o yaml   # check Ready + cloudflareMetadata.recordID
 **Tunnel-specific design notes:**
 - `TunnelAPI` interface: `CreateTunnel/GetTunnel/ListTunnels/GetTunnelToken/CleanupTunnelConnections/DeleteTunnel`
 - `rc` is `cloudflare.AccountIdentifier(accountID)` — account-scoped
-- cloudflare-go v0.89 `UpdateTunnel` omits the tunnel ID from the request path, so renames are impossible;
-  `spec.name` and `spec.accountRef` are immutable via CEL (`self == oldSelf`)
+- cloudflare-go v0's `UpdateTunnel` (still in v0.119) omits the tunnel ID from the request path, so renames are
+  impossible; `spec.name` and `spec.accountRef` are immutable via CEL (`self == oldSelf`)
 - `CreateTunnel` requires a secret client-side; the controller sends 32 random bytes (base64) and never stores them
 - Deletion calls `CleanupTunnelConnections` first, which drops even active connectors, then `DeleteTunnel`;
   a running cloudflared is disconnected immediately (verified live)
@@ -336,8 +336,8 @@ kubectl get secret example-tunnel-token -o yaml  # TUNNEL_TOKEN for cloudflared
 - Cloudflare rejects a config whose last rule has a hostname or path, and rejects an empty rule list (verified live)
 - Cloudflare returns the config exactly as written plus `warp-routing: {enabled: false}` and an empty top-level
   `originRequest`; both count as "unchanged" (verified live — an idle reconcile does not bump the version)
-- `originRequest` timeouts are not exposed: cloudflare-go v0.89 `TunnelDuration` marshals float seconds but only
-  unmarshals integers
+- `originRequest` timeouts are not exposed: cloudflare-go v0's `TunnelDuration` (still in v0.119) marshals float
+  seconds but only unmarshals integers
 - Each hostname still needs a proxied CNAME to `<tunnelID>.cfargotunnel.com` (use a `DNSRecord`)
 - Drift is only corrected when something triggers a reconcile (spec change, Tunnel change, resync period)
 
@@ -450,8 +450,8 @@ shared machinery once; each rule CRD on top of it is mostly types plus a convers
 |--------|--------|------------|--------------------------|
 | `feat/kv-namespace-controller` | `KVNamespace` (+ WorkerScript `kvNamespaceRef`) | shared-client | ✅ |
 | `feat/r2-bucket-controller` | `R2Bucket` (+ WorkerScript `r2BucketRef`) | shared-client | ✅ |
-| `feat/cloudflare-go-v0.119` | none: SDK bump | — | Next, if the [SDK decision](#sdk-decision) is accepted |
-| `feat/rulesets-foundation` | none: Rulesets client calls and the shared rule sync | zone-controller | Live probes first |
+| `feat/cloudflare-go-v0.119` | none: SDK bump (see [SDK decision](#sdk-decision)) | — | ✅ |
+| `feat/rulesets-foundation` | none: Rulesets client calls and the shared rule sync | zone-controller | **Next.** Live probes first |
 | `feat/waf-custom-rule-controller` | `WAFCustomRule` (was `FirewallRule`) | rulesets-foundation | Free: 5 rules, no regex, no Log action, no custom block response |
 | `feat/rate-limit-rule-controller` | `RateLimitRule` (was `RateLimit`) | rulesets-foundation | Free: 1 rule, 10 s period, counts by IP |
 | `feat/ip-list-controller` | `IPList` | shared-client | Free: 1 list, 10,000 items, IP lists only |
@@ -509,11 +509,11 @@ permission group names; deploy.md uses the dashboard's labels, so look those up 
   before creating one)
 
 #### SDK decision
-**Status:** Proposed 2026-10-09; confirm before `feat/rulesets-foundation`
+**Status:** Accepted 2026-10-09. Step 1 is done: kflare uses cloudflare-go **v0.119.0**
 
-kflare pins cloudflare-go **v0.89.0**, and its gaps keep costing features. Checked 2026-10-09:
+kflare pinned cloudflare-go v0.89.0 until October 2026, and its gaps kept costing features. Checked 2026-10-09:
 
-| | v0.89.0 (pinned) | v0.119.0 (newest v0, 2026-09-25) | v7.12.0 (generated SDK, 2026-10-01) |
+| | v0.89.0 (pinned until 2026-10) | v0.119.0 (newest v0, 2026-09-25; now used) | v7.12.0 (generated SDK, 2026-10-01) |
 |---|---|---|---|
 | Create / edit / delete one rule in a ruleset | none | delete only | all three |
 | Reusable Access policies (`/access/policies`) | no: app-scoped policies only | yes | yes |
@@ -521,16 +521,28 @@ kflare pins cloudflare-go **v0.89.0**, and its gaps keep costing features. Check
 | Tunnel rename (`UpdateTunnel` sends the tunnel ID) | no | no | yes |
 | Cost to adopt | — | one compile error: `DNSRecord.ZoneID` was removed (take the zone ID from the Zone), plus test fixtures | every controller's interface and fakes, and `errors.go` (different error types) |
 
-Proposed:
-1. **Bump to v0.119 now**, in its own PR (`feat/cloudflare-go-v0.119`). It is small, and brings `DeleteRulesetRule` and
-   reusable Access policies. Run the unit and live e2e suites: 30 minor versions can change behaviour without
-   breaking the build
+Decided:
+1. ✅ **Bump to v0.119**, in its own PR (`feat/cloudflare-go-v0.119`). It brings `DeleteRulesetRule` and reusable
+   Access policies. See the bump notes below
 2. **Fill the remaining gaps with `API.Raw`** wrappers in `pkg/cloudflare`. For rulesets only the create and edit calls
    are missing: v0's `cf.RulesetRule` and `cf.Ruleset` types already model rules, and `Raw` returns the same typed
    errors as every other call
 3. **Move to the generated SDK later, controller by controller** (Phase 4, or sooner if the v0 line stops getting
    releases). Each controller already sits behind its own narrow interface, so `pkg/cloudflare.Client` can embed both
    SDKs during the move, with `errors.go` classifying both error types until it is done
+
+**Bump notes (v0.89 → v0.119, 2026-10-12):**
+- `DNSRecord` lost `ZoneID`, `ZoneName` and `Locked`. A DNSRecord's `status.cloudflareMetadata.zoneID` now comes from
+  its Zone, as the field's documentation already said
+- `DNSRecord` gained `settings` (`flatten_cname`), so every create and update sends `"settings":{}`. Verified live on
+  `kflare.dev`: a create, then a content change through `UpdateDNSRecord`, changed only the content; TTL, comment,
+  `proxied`, `settings` and `tags` stayed as they were
+- The error types now `Unwrap()` to `*cf.Error`. `pkg/cloudflare/errors.go` classifies them as before: its `errors.As`
+  targets are the typed errors
+- The response envelope also accepts bare strings in `errors` and `messages`
+- The request path, its retries and its rate limiting are unchanged. `go-retryablehttp` and `go-cleanhttp` left the
+  module graph: in v0.89 only the experimental client and the STS code, which kflare does not use, imported them
+- Unit and envtest suites (Kubernetes 1.34.1 and 1.37.0), lint, and the live e2e (10 of 10, run `92c397`) passed
 
 #### Deferred: paid plan, add-on or account setup
 
@@ -544,7 +556,7 @@ Last checked 2026-10-07; the Free-plan limits and Zero Trust again on 2026-10-09
 |------|-------|----------------|-------------------|-------------------------|
 | `LoadBalancerMonitor`, `LoadBalancer` (+ pools) | Load Balancing add-on (account) | $5/month incl. 2 origins, +$5/origin/month, +$0.50 per 500K DNS queries | Live, 2026-10-06: every monitor create fails, `interval is not in range [1, 1]`. The token already has Load Balancing: Monitors and Pools Write | Subscribe, build the monitor then the load balancer; cancel after if it was only for testing |
 | `HealthCheck` (standalone, zone-level Health Checks) | Pro plan or higher on the zone; zone-level Health Checks Write on the token | Pro plan ~$20+/month per zone | Docs: Free plan gets 0 checks (Pro 10, Business 50). Token has Health Checks Read only | Not in the Phase 3 table yet. Add a branch once a Pro zone exists; keep it separate from `LoadBalancerMonitor` |
-| R2Bucket `storageClass` (a bucket's default storage class, `Standard` or `InfrequentAccess`) | Nothing to subscribe to, but R2's free tier covers Standard storage only, so testing Infrequent Access is billed usage | Usage-based; see R2 pricing | Not probed, to stay free. Every bucket on the account reports `Standard`. Also needs `Raw` calls: cloudflare-go v0.89 cannot send the `cf-r2-storage-class` header | Decide whether a few cents of test usage are acceptable, then add it as an optional, mutable field (create header + PATCH) |
+| R2Bucket `storageClass` (a bucket's default storage class, `Standard` or `InfrequentAccess`) | Nothing to subscribe to, but R2's free tier covers Standard storage only, so testing Infrequent Access is billed usage | Usage-based; see R2 pricing | Not probed, to stay free. Every bucket on the account reports `Standard`. Also needs `Raw` calls: cloudflare-go v0.119 cannot send the `cf-r2-storage-class` header | Decide whether a few cents of test usage are acceptable, then add it as an optional, mutable field (create header + PATCH) |
 
 **Built, but not verified live because it costs money:**
 
@@ -614,8 +626,8 @@ work unchanged.
 
 **KVNamespace design notes (verified live):**
 - `KVNamespaceAPI` interface: `CreateWorkersKVNamespace/ListWorkersKVNamespaces/UpdateWorkersKVNamespace/
-  DeleteWorkersKVNamespace` (account-level `rc`); cloudflare-go v0.89 has no single-namespace read, so the
-  controller lists (the SDK pages) and matches the ID
+  DeleteWorkersKVNamespace` (account-level `rc`); cloudflare-go v0 (v0.119 too) has no single-namespace read, so
+  the controller lists (the SDK pages) and matches the ID
 - Titles are unique per account (duplicate → 400, code 10014); unknown namespace ID → 404 (10013); rename (PUT)
   keeps the ID
 - Cloudflare deletes a namespace a Worker is bound to and leaves the binding dangling; every later upload of that
@@ -653,14 +665,14 @@ work unchanged.
 - Needs the account-level **Workers R2 Storage: Edit** permission
 
 **Not supported yet:**
-- Jurisdictions (`eu`, `fedramp`): cloudflare-go v0.89 cannot send `cf-r2-jurisdiction`, and its Worker R2 binding has
-  no `jurisdiction` field. Needs `Raw` calls and a custom binding, or a newer SDK
+- Jurisdictions (`eu`, `fedramp`): cloudflare-go v0.119 cannot send `cf-r2-jurisdiction`, and its Worker R2 binding
+  has no `jurisdiction` field. Needs `Raw` calls and a custom binding, or the generated SDK (v7 supports both)
 - Default storage class: see Deferred (Infrequent Access testing is billed)
 - Bucket configuration that Terraform models as separate resources: CORS, lifecycle rules, custom domains and the
   r2.dev public URL, event notifications, bucket locks, Sippy
 
 #### Branch: `feat/rulesets-foundation`
-**Depends on:** `feat/zone-controller` and the [SDK decision](#sdk-decision)
+**Depends on:** `feat/zone-controller`, `feat/cloudflare-go-v0.119`
 **Merges into:** main, before any rule CRD branch starts (no stacked PRs)
 **Status:** 🔲 Not started
 
@@ -679,7 +691,7 @@ it is unit-tested with fakes, then proven live by `WAFCustomRule`.
   - Deleting the last rule: does the entry point stay, empty?
 - [ ] `pkg/cloudflare/rulesets.go`: `CreateRulesetRule` and `UpdateRulesetRule` through `API.Raw` (POST
   `/zones/{zone}/rulesets/{ruleset}/rules`, PATCH `.../rules/{rule}`), with an optional `position`. Each returns the
-  updated `cf.Ruleset`. `DeleteRulesetRule` comes with v0.119 (otherwise `Raw` as well). Unit tests against `httptest`
+  updated `cf.Ruleset`. `DeleteRulesetRule` is in the SDK since v0.119. Unit tests against `httptest`
 - [ ] `internal/controller/rulesetrule.go` syncs one rule in any phase:
   1. Resolve the Zone (its zone ID) and the account's token, as DNSRecord does
   2. Get the phase entry point. On 404 (code 10003), create it: POST `/zones/{zone}/rulesets` with `kind: zone`, the
@@ -763,7 +775,7 @@ An account-level custom IP list, for expressions such as `ip.src in $office_ips`
   `kflare.dev/ip-list-id` label, like KVNamespace
 - [ ] Deletion: check live whether Cloudflare refuses to delete a list that a rule references. If it does, report
   `ListInUse` and retry every minute, like `BucketNotEmpty`
-- [ ] v0.89 already has the Lists calls (`CreateList`, `GetList`, `UpdateList`, `DeleteList`, `ReplaceListItems`)
+- [ ] The SDK already has the Lists calls (`CreateList`, `GetList`, `UpdateList`, `DeleteList`, `ReplaceListItems`)
 - [ ] Live e2e: one list (Free allows one; the account has none as of 2026-10-09), optionally referenced by the WAF e2e
   rule
 
@@ -776,7 +788,7 @@ An account-level custom IP list, for expressions such as `ip.src in $office_ips`
 - [ ] `AccessGroup` (include, exclude and require rules), `AccessPolicy` (a reusable, account-level policy that
   references groups) and `AccessApplication` (self-hosted: domains, session duration, and policies by reference with a
   precedence). One PR per kind if the branch grows large
-- [ ] Reusable policies need v0.119 or later; v0.89 creates only app-scoped policies (see the SDK decision)
+- [ ] Reusable policies (`/access/policies`) are in the SDK since v0.119; v0.89 could only create app-scoped policies
 - [ ] Deletion order: an application before its policies, a policy before its groups, using `protection.go`. Check
   live what Cloudflare refuses
 - [ ] Live e2e once Zero Trust is enabled (the free plan covers up to 50 users)
@@ -964,6 +976,6 @@ export CF_E2E_ZONE=kflare.dev               # zone for the DNS e2e specs; adopte
 ## Current Status
 
 > **Phases 1 and 2 complete. Phase 3 in progress: `KVNamespace` and `R2Bucket` done.**
-> Next: confirm the SDK decision, then `feat/rulesets-foundation` and `WAFCustomRule` (see Phase 3). Items needing a
+> cloudflare-go is at v0.119. Next: `feat/rulesets-foundation`, then `WAFCustomRule` (see Phase 3). Items needing a
 > paid plan, add-on or account setup are tracked under "Deferred: paid plan, add-on or account setup" in Phase 3.
 > Last updated: October 2026
