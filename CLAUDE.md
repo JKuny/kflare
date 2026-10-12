@@ -451,8 +451,8 @@ shared machinery once; each rule CRD on top of it is mostly types plus a convers
 | `feat/kv-namespace-controller` | `KVNamespace` (+ WorkerScript `kvNamespaceRef`) | shared-client | ✅ |
 | `feat/r2-bucket-controller` | `R2Bucket` (+ WorkerScript `r2BucketRef`) | shared-client | ✅ |
 | `feat/cloudflare-go-v0.119` | none: SDK bump (see [SDK decision](#sdk-decision)) | — | ✅ |
-| `feat/rulesets-foundation` | none: Rulesets client calls and the shared rule sync | zone-controller | **Next.** Live probes first |
-| `feat/waf-custom-rule-controller` | `WAFCustomRule` (was `FirewallRule`) | rulesets-foundation | Free: 5 rules, no regex, no Log action, no custom block response |
+| `feat/rulesets-foundation` | none: Rulesets client calls and the shared rule sync | zone-controller | ✅ |
+| `feat/waf-custom-rule-controller` | `WAFCustomRule` (was `FirewallRule`) | rulesets-foundation | **Next.** Free: 5 rules, no regex, no Log action, no custom block response |
 | `feat/rate-limit-rule-controller` | `RateLimitRule` (was `RateLimit`) | rulesets-foundation | Free: 1 rule, 10 s period, counts by IP |
 | `feat/ip-list-controller` | `IPList` | shared-client | Free: 1 list, 10,000 items, IP lists only |
 | `feat/zero-trust-controllers` | `AccessGroup`, `AccessPolicy`, `AccessApplication` | shared-client | Blocked: Zero Trust is not enabled on the account (a free plan exists) |
@@ -515,18 +515,19 @@ kflare pinned cloudflare-go v0.89.0 until October 2026, and its gaps kept costin
 
 | | v0.89.0 (pinned until 2026-10) | v0.119.0 (newest v0, 2026-09-25; now used) | v7.12.0 (generated SDK, 2026-10-01) |
 |---|---|---|---|
-| Create / edit / delete one rule in a ruleset | none | delete only | all three |
+| Create / edit / delete one rule in a ruleset | none | delete only, and it fails on the live API (see the foundation) | all three |
 | Reusable Access policies (`/access/policies`) | no: app-scoped policies only | yes | yes |
 | R2 jurisdictions (`cf-r2-jurisdiction`) | no | no | yes |
 | Tunnel rename (`UpdateTunnel` sends the tunnel ID) | no | no | yes |
 | Cost to adopt | — | one compile error: `DNSRecord.ZoneID` was removed (take the zone ID from the Zone), plus test fixtures | every controller's interface and fakes, and `errors.go` (different error types) |
 
 Decided:
-1. ✅ **Bump to v0.119**, in its own PR (`feat/cloudflare-go-v0.119`). It brings `DeleteRulesetRule` and reusable
-   Access policies. See the bump notes below
-2. **Fill the remaining gaps with `API.Raw`** wrappers in `pkg/cloudflare`. For rulesets only the create and edit calls
-   are missing: v0's `cf.RulesetRule` and `cf.Ruleset` types already model rules, and `Raw` returns the same typed
-   errors as every other call
+1. ✅ **Bump to v0.119**, in its own PR (`feat/cloudflare-go-v0.119`). It brings reusable Access policies. Its
+   `DeleteRulesetRule` turned out to fail on the live API, so kflare makes that call itself too. See the bump notes
+   below
+2. **Fill the remaining gaps with `API.Raw`** wrappers in `pkg/cloudflare`. ✅ For rulesets (`feat/rulesets-foundation`):
+   rule create, edit, move and delete. v0's `cf.RulesetRule` and `cf.Ruleset` types already model rules, and `Raw`
+   returns the same typed errors as every other call. Still open: R2 jurisdictions
 3. **Move to the generated SDK later, controller by controller** (Phase 4, or sooner if the v0 line stops getting
    releases). Each controller already sits behind its own narrow interface, so `pkg/cloudflare.Client` can embed both
    SDKs during the move, with `errors.go` classifying both error types until it is done
@@ -674,48 +675,62 @@ work unchanged.
 #### Branch: `feat/rulesets-foundation`
 **Depends on:** `feat/zone-controller`, `feat/cloudflare-go-v0.119`
 **Merges into:** main, before any rule CRD branch starts (no stacked PRs)
-**Status:** 🔲 Not started
+**Status:** ✅ Complete
 
 Shared machinery for every resource that is one rule in a zone's phase entry point ruleset. It has no CRD of its own:
-it is unit-tested with fakes, then proven live by `WAFCustomRule`.
+it is unit-tested against a fake that follows the live API, was run live on `kflare.dev` (2026-10-12: entry point
+creation, idle sync, placement, reordering, drift, deletion), and `WAFCustomRule` adds it to the e2e suite.
 
-- [ ] Live probes first, on `kflare.dev` with `kflare-probe-*` refs, deleting everything afterwards (the dev token can
-  already write `http_request_firewall_custom`):
-  - Does a rule keep its `id` across a PATCH? The docs describe the ID as identifying "a given version of a rule",
-    which is why kflare finds its rules by `ref`
-  - What Cloudflare adds or defaults on a rule it returns (`version`, `last_updated`, `logging`, action parameter
-    defaults), for the drift comparison
-  - Creating the entry point when one already exists (two resources racing to create it): status and error code
-  - Two concurrent POSTs to `/rules`: do both rules land?
-  - PATCH replaces the whole rule (per the docs): confirm that an omitted field is reset
-  - Deleting the last rule: does the entry point stay, empty?
-- [ ] `pkg/cloudflare/rulesets.go`: `CreateRulesetRule` and `UpdateRulesetRule` through `API.Raw` (POST
-  `/zones/{zone}/rulesets/{ruleset}/rules`, PATCH `.../rules/{rule}`), with an optional `position`. Each returns the
-  updated `cf.Ruleset`. `DeleteRulesetRule` is in the SDK since v0.119. Unit tests against `httptest`
-- [ ] `internal/controller/rulesetrule.go` syncs one rule in any phase:
-  1. Resolve the Zone (its zone ID) and the account's token, as DNSRecord does
-  2. Get the phase entry point. On 404 (code 10003), create it: POST `/zones/{zone}/rulesets` with `kind: zone`, the
-     phase and this rule. **Never PUT the entry point**: a PUT replaces every rule in it, including rules kflare
-     does not manage. If the create loses a race, get the entry point again
-  3. Find the rule by its `ref`. Missing → POST it; different → PATCH the whole rule; same → no write
-  4. Record the ruleset ID, rule ID and rule version in status
-  - Deletion: DELETE the rule found by `ref` unless `retain`. Skip the call when the Zone is gone, as DNSRecord does.
-    The entry point stays, even when empty
-- [ ] Ownership on the Cloudflare side through `ref`: `kflare-` + the first 32 hex characters of SHA-256 over
-  `<kind>/<namespace>/<name>`. Refs are unique within a ruleset (duplicate: code 20023) and at most 128 bytes (code
-  20166). A ref derived from the name survives cluster loss and backup restores, which a UID would not. kflare never
-  touches a rule whose ref it did not derive, and does not adopt rules implicitly: rules have no natural key. Rules
-  will therefore not share the "no ownership marker on the Cloudflare side" limitation
-- [ ] Ordering: optional `spec.priority` (lower runs first; ties broken by namespace/name). kflare orders only the
-  rules it manages in a zone and phase, across every kind that writes to that phase. When the reconciled rule is out
-  of place among them, kflare moves that rule alone (PATCH with `position.before` or `position.after` a neighbouring
-  kflare rule). Rules created outside kflare keep their place. If this proves fragile, fall back to append-only and
-  document it
-- [ ] Drift: compare only the fields kflare sets (expression, action, action parameters, rate limit, enabled,
-  description), after normalizing what Cloudflare adds. An idle reconcile writes nothing; the e2e checks that the
-  ruleset version stays the same
-- [ ] Rule kinds join `zoneDependents`, so a Zone waits for its rules
-- [ ] ARCHITECTURE.md: drift and adoption rows, a rules ownership subsection, the known-limitations update
+- [x] Live probes on `kflare.dev` (2026-10-12, `kflare-probe-*` refs; everything deleted afterwards, the entry point
+  too). Results below
+- [x] `pkg/cloudflare/rulesets.go`: `CreateRulesetRule`, `UpdateRulesetRule`, `MoveRulesetRule` (position only) and
+  `DeleteRulesetRule` on `*Client`, through `API.Raw`; each returns the updated `cf.Ruleset`. The delete replaces
+  cloudflare-go's, which fails on the live API (it expects an empty 204; Cloudflare answers 200 with the ruleset).
+  Unit tests against `httptest`
+- [x] `internal/controller/rulesetrule.go` (interface `RulesetRuleAPI`):
+  - `syncRulesetRule(zoneID, phase, rule, peers)`: gets the phase's entry point. On 404 it creates it holding the
+    rule (`kind: zone`, name `default`); on 400 code 20217 (another resource created it first) it reads it again.
+    It finds the rule by ref: missing → POST, placed among its peers; different → PATCH the whole rule; same → no
+    write. A write that gets a 404 (the rule or ruleset was deleted meanwhile) starts over once. Then it orders the
+    peers. It returns the ruleset ID, rule ID and rule version, and whether it wrote or moved anything
+  - `deleteRulesetRule(zoneID, phase, ref)`: a missing entry point or rule counts as deleted. The entry point stays,
+    even when emptied
+  - It never PUTs an entry point: that replaces every rule in it, including rules kflare does not manage
+- [x] Ownership on the Cloudflare side through `ref` (`rulesetRuleRef`): `kflare-` + the first 32 hex characters of
+  SHA-256 over `<kind>/<namespace>/<name>`. Refs are unique within a ruleset (duplicate: code 20023), at most 128
+  bytes (code 20166) and cannot change once set. A ref derived from the name survives cluster loss and backup
+  restores, which a UID would not. kflare never touches a rule whose ref it did not derive, and does not adopt rules
+  implicitly: rules have no natural key
+- [x] Ordering (`rulesetRulePeer`: ref, priority, namespace, name, kind). The caller passes every kflare rule in the
+  zone and phase, across kinds. A new rule goes right after the closest peer that sorts before it, else right before
+  the closest that sorts after it. Then one pass moves any peer whose rule sits before its predecessor's to right
+  after it, with a position-only PATCH, which changes neither definition nor version. This moves other resources'
+  rules too, but only kflare's; rules created outside kflare keep their place. Changed from "move only the reconciled
+  rule": that cannot always restore the order, because a misplaced peer may never reconcile. `moved` tells the caller
+  to check again shortly, since two syncs reordering at once from different cluster views can leave rules out of order
+- [x] Drift (`rulesetRuleMatches`): compares the definitions as JSON values, without the fields Cloudflare sets (ID,
+  version, last update) and without nulls and empty objects, and counts Cloudflare's defaults as set (`enabled:
+  true`; `logging: {enabled: true}` on skip rules). Callers set every field they want: an update resets the rest
+- Moved to `feat/waf-custom-rule-controller`, which has the first CRD: listing the peers, the requeue after a move,
+  rule kinds in `zoneDependents`, the e2e check that an idle reconcile leaves the ruleset version alone, and
+  ARCHITECTURE.md
+
+**Rulesets API behavior (verified live on `kflare.dev`, 2026-10-12):**
+- POST `/zones/{zone}/rulesets` (`kind: zone`, the phase) creates the entry point, the ruleset and its rule each at
+  version 1. A second zone entry point in the phase → 400, code 20217
+- A rule comes back exactly as sent plus `id`, `version` and `last_updated`, with two defaults: `enabled: true` when
+  omitted, and `logging: {enabled: true}` on a skip rule
+- POST `/rules` appends unless `position` says otherwise; two concurrent POSTs both land. Every write bumps the
+  ruleset's version and returns the whole ruleset
+- PATCH replaces the whole rule: an omitted `description` is reset, an omitted `enabled` becomes true, an omitted
+  `ref` is kept. The rule keeps its `id`; its version goes up. A different ref → 400, codes 20023 and 20142
+- A PATCH with only `position` moves the rule without changing its definition or version
+- DELETE `/rules/{id}` → 200 with the updated ruleset. Deleting the last rule leaves the entry point, with
+  `rules: null`; DELETE `/rulesets/{id}` removes it (204)
+- Unknown rule → 404, code 10002 (PATCH and DELETE); unknown ruleset → 404, code 10001; over the plan's quota → 400,
+  code 50001 (also for a single-rule POST)
+- cloudflare-go v0.119's `DeleteRulesetRule` deletes the rule, then returns an untyped error: it treats the response
+  body as a failure
 
 **Rulesets facts (dry runs on `kflare.dev`, 2026-10-09; nothing written):**
 - `kflare.dev` has no zone entry point in any phase: `GET .../rulesets/phases/{phase}/entrypoint` returns 404, code
@@ -735,16 +750,22 @@ it is unit-tested with fakes, then proven live by `WAFCustomRule`.
 **Depends on:** `feat/rulesets-foundation`
 **Status:** 🔲 Not started
 
-- [ ] `api/v1alpha1/wafcustomrule_types.go`: `spec.zoneRef` (immutable), `expression`, `action` (`block`,
-  `managed_challenge`, `js_challenge`, `challenge`, `skip`, `log`), skip parameters (the rest of the current ruleset,
-  `phases` or `products`) allowed only with `action: skip` (CEL), optional `response` for `block` (a custom body; paid),
-  `enabled` (default true), `description`, `priority`. `status.cloudflareMetadata`: zone ID, ruleset ID, rule ID, ref,
-  version
-- [ ] Controller: the foundation in the `http_request_firewall_custom` phase; watches Zones
+- [ ] Shared API types for every rule kind, in their own file: spec `zoneRef` (immutable), `expression`, `enabled`
+  (default true), `description`, `priority`; status `cloudflareMetadata` (zone ID, ruleset ID, rule ID, ref, version)
+- [ ] `api/v1alpha1/wafcustomrule_types.go`: the shared fields, plus `action` (`block`, `managed_challenge`,
+  `js_challenge`, `challenge`, `skip`, `log`), skip parameters (the rest of the current ruleset, `phases` or
+  `products`) allowed only with `action: skip` (CEL), and an optional `response` for `block` (a custom body; paid)
+- [ ] Controller: the foundation in the `http_request_firewall_custom` phase; watches Zones. Peers: every rule kind
+  writing to the phase (only `WAFCustomRule` here), across namespaces, whose Zone has the same zone ID and that is not
+  being deleted. Requeues after about 10 s when the sync reports `moved`
+- [ ] Rule kinds join `zoneDependents`, so a Zone waits for its rules
 - [ ] Unit tests for the spec → rule conversion (every action's parameters); envtest for the CEL rules
 - [ ] Live e2e: a `block` rule for `/kflare-e2e-<run>`, checked through the entry point; an idle reconcile leaves the
   ruleset version alone; deletion removes the rule. It uses 1 of Free's 5 rules
-- [ ] Sample, deploy.md permission row, ARCHITECTURE.md rows
+- [ ] Sample, deploy.md permission row
+- [ ] ARCHITECTURE.md: drift and adoption rows, a rules subsection (ownership by ref; kflare reorders only its own
+  rules; it never replaces an entry point), and the known-limitations update: rules carry an ownership marker on the
+  Cloudflare side
 
 
 #### Branch: `feat/rate-limit-rule-controller`
@@ -976,6 +997,7 @@ export CF_E2E_ZONE=kflare.dev               # zone for the DNS e2e specs; adopte
 ## Current Status
 
 > **Phases 1 and 2 complete. Phase 3 in progress: `KVNamespace` and `R2Bucket` done.**
-> cloudflare-go is at v0.119. Next: `feat/rulesets-foundation`, then `WAFCustomRule` (see Phase 3). Items needing a
-> paid plan, add-on or account setup are tracked under "Deferred: paid plan, add-on or account setup" in Phase 3.
+> cloudflare-go is at v0.119 and the Rulesets foundation is in place. Next: `WAFCustomRule` (see Phase 3). Items
+> needing a paid plan, add-on or account setup are tracked under "Deferred: paid plan, add-on or account setup" in
+> Phase 3.
 > Last updated: October 2026
