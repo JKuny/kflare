@@ -190,7 +190,8 @@ object in place.
   An explicit opt-in for adopting objects kflare did not create would make this safer.
 - **No ownership marker on the Cloudflare side.** kflare tracks what it owns only in Kubernetes. If the cluster's
   resources are lost, kflare cannot tell its objects apart from anyone else's.
-- **Pinned to the legacy SDK.** kflare uses cloudflare-go v0.89. Some limitations come from it: Tunnel renames are
-  impossible because `UpdateTunnel` omits the tunnel ID from the request path, `originRequest` timeouts are not
-  exposed because `TunnelDuration` does not round-trip, and R2Bucket manages buckets in the default jurisdiction only:
-  the SDK cannot send the `cf-r2-jurisdiction` header, and its Worker R2 binding has no jurisdiction field.
+- **Pinned to the legacy SDK.** kflare uses cloudflare-go v0.119, the newest of the v0 line. Some limitations come
+  from it: Tunnel renames are impossible because `UpdateTunnel` omits the tunnel ID from the request path,
+  `originRequest` timeouts are not exposed because `TunnelDuration` does not round-trip, and R2Bucket manages buckets
+  in the default jurisdiction only: the SDK cannot send the `cf-r2-jurisdiction` header, and its Worker R2 binding has
+  no jurisdiction field.
