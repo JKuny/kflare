@@ -422,7 +422,7 @@ var _ = Describe("DNSRecord Controller", func() {
 			record.Finalizers = []string{reconciler.Finalizer}
 			Expect(k8sClient.Update(ctx, record)).To(Succeed())
 
-			created := cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300, Proxiable: true}
+			created := cf.DNSRecord{ID: dnsFakeRecordID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300, Proxiable: true}
 			fake := &fakeDNSRecordAPI{listRecords: []cf.DNSRecord{}, createRecord: created}
 			r := reconcilerWithFakeDNSAPI(fake)
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: recordKey})
@@ -450,7 +450,7 @@ var _ = Describe("DNSRecord Controller", func() {
 			record.Finalizers = []string{reconciler.Finalizer}
 			Expect(k8sClient.Update(ctx, record)).To(Succeed())
 
-			existing := cf.DNSRecord{ID: "existing-111", ZoneID: dnsFakeZoneID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300}
+			existing := cf.DNSRecord{ID: "existing-111", Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300}
 			fake := &fakeDNSRecordAPI{listRecords: []cf.DNSRecord{existing}}
 			r := reconcilerWithFakeDNSAPI(fake)
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: recordKey})
@@ -487,8 +487,8 @@ var _ = Describe("DNSRecord Controller", func() {
 			Expect(k8sClient.Create(ctx, owner)).To(Succeed())
 			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, owner)).To(Succeed()) })
 
-			taken := cf.DNSRecord{ID: "taken-111", ZoneID: dnsFakeZoneID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300}
-			created := cf.DNSRecord{ID: "new-222", ZoneID: dnsFakeZoneID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300}
+			taken := cf.DNSRecord{ID: "taken-111", Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300}
+			created := cf.DNSRecord{ID: "new-222", Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300}
 			fake := &fakeDNSRecordAPI{listRecords: []cf.DNSRecord{taken}, createRecord: created}
 			_, err := reconcilerWithFakeDNSAPI(fake).Reconcile(ctx, reconcile.Request{NamespacedName: recordKey})
 			Expect(err).NotTo(HaveOccurred())
@@ -511,7 +511,7 @@ var _ = Describe("DNSRecord Controller", func() {
 			Expect(k8sClient.Update(ctx, record)).To(Succeed())
 
 			// Cloudflare always reports proxied, even for records that never set it.
-			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID, Name: dnsRecordName, Type: dnsRecordType,
+			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, Name: dnsRecordName, Type: dnsRecordType,
 				Content: dnsRecordIP, TTL: 300, Proxied: cf.BoolPtr(false), Tags: []string{}}
 			fake := &fakeDNSRecordAPI{getRecord: cfRecord}
 			r := reconcilerWithFakeDNSAPI(fake)
@@ -544,7 +544,7 @@ var _ = Describe("DNSRecord Controller", func() {
 			Expect(k8sClient.Update(ctx, rec)).To(Succeed())
 
 			// What Cloudflare returns for a record created without ttl or proxied.
-			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID, Name: dnsRecordName, Type: dnsRecordType,
+			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, Name: dnsRecordName, Type: dnsRecordType,
 				Content: dnsRecordIP, TTL: 1, Proxied: cf.BoolPtr(false), Tags: []string{}}
 			fake := &fakeDNSRecordAPI{getRecord: cfRecord}
 			r := reconcilerWithFakeDNSAPI(fake)
@@ -565,8 +565,8 @@ var _ = Describe("DNSRecord Controller", func() {
 			Expect(k8sClient.Update(ctx, record)).To(Succeed())
 
 			// CF has a different IP.
-			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID, Name: dnsRecordName, Type: dnsRecordType, Content: "9.9.9.9", TTL: 300}
-			updated := cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300}
+			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, Name: dnsRecordName, Type: dnsRecordType, Content: "9.9.9.9", TTL: 300}
+			updated := cf.DNSRecord{ID: dnsFakeRecordID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300}
 			fake := &fakeDNSRecordAPI{getRecord: cfRecord, updateRecord: updated}
 			r := reconcilerWithFakeDNSAPI(fake)
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: recordKey})
@@ -589,8 +589,8 @@ var _ = Describe("DNSRecord Controller", func() {
 			record.Finalizers = []string{reconciler.Finalizer}
 			Expect(k8sClient.Update(ctx, record)).To(Succeed())
 
-			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 1}
-			updated := cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300}
+			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 1}
+			updated := cf.DNSRecord{ID: dnsFakeRecordID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300}
 			fake := &fakeDNSRecordAPI{getRecord: cfRecord, updateRecord: updated}
 			r := reconcilerWithFakeDNSAPI(fake)
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: recordKey})
@@ -623,8 +623,8 @@ var _ = Describe("DNSRecord Controller", func() {
 			Expect(k8sClient.Update(ctx, rec)).To(Succeed())
 
 			cfProxied := false
-			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300, Proxied: &cfProxied}
-			fake := &fakeDNSRecordAPI{getRecord: cfRecord, updateRecord: cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID}}
+			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300, Proxied: &cfProxied}
+			fake := &fakeDNSRecordAPI{getRecord: cfRecord, updateRecord: cf.DNSRecord{ID: dnsFakeRecordID}}
 			r := reconcilerWithFakeDNSAPI(fake)
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: recordKey})
 			Expect(err).NotTo(HaveOccurred())
@@ -655,8 +655,8 @@ var _ = Describe("DNSRecord Controller", func() {
 			Expect(k8sClient.Update(ctx, rec)).To(Succeed())
 
 			cfPriority := uint16(20)
-			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID, Name: "mail.example.com", Type: "MX", Content: "mail.example.com", TTL: 300, Priority: &cfPriority}
-			fake := &fakeDNSRecordAPI{getRecord: cfRecord, updateRecord: cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID}}
+			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, Name: "mail.example.com", Type: "MX", Content: "mail.example.com", TTL: 300, Priority: &cfPriority}
+			fake := &fakeDNSRecordAPI{getRecord: cfRecord, updateRecord: cf.DNSRecord{ID: dnsFakeRecordID}}
 			r := reconcilerWithFakeDNSAPI(fake)
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: recordKey})
 			Expect(err).NotTo(HaveOccurred())
@@ -685,8 +685,8 @@ var _ = Describe("DNSRecord Controller", func() {
 			rec.Finalizers = []string{reconciler.Finalizer}
 			Expect(k8sClient.Update(ctx, rec)).To(Succeed())
 
-			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300, Comment: "old comment"}
-			fake := &fakeDNSRecordAPI{getRecord: cfRecord, updateRecord: cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID}}
+			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300, Comment: "old comment"}
+			fake := &fakeDNSRecordAPI{getRecord: cfRecord, updateRecord: cf.DNSRecord{ID: dnsFakeRecordID}}
 			r := reconcilerWithFakeDNSAPI(fake)
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: recordKey})
 			Expect(err).NotTo(HaveOccurred())
@@ -715,8 +715,8 @@ var _ = Describe("DNSRecord Controller", func() {
 			rec.Finalizers = []string{reconciler.Finalizer}
 			Expect(k8sClient.Update(ctx, rec)).To(Succeed())
 
-			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300, Tags: []string{"env:staging"}}
-			fake := &fakeDNSRecordAPI{getRecord: cfRecord, updateRecord: cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID}}
+			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300, Tags: []string{"env:staging"}}
+			fake := &fakeDNSRecordAPI{getRecord: cfRecord, updateRecord: cf.DNSRecord{ID: dnsFakeRecordID}}
 			r := reconcilerWithFakeDNSAPI(fake)
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: recordKey})
 			Expect(err).NotTo(HaveOccurred())
@@ -745,11 +745,11 @@ var _ = Describe("DNSRecord Controller", func() {
 			Expect(k8sClient.Update(ctx, rec)).To(Succeed())
 
 			cfRecord := cf.DNSRecord{
-				ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID,
+				ID:   dnsFakeRecordID,
 				Name: "_http._tcp.example.com", Type: "SRV", TTL: 300,
 				Data: map[string]interface{}{"port": float64(9000), "weight": float64(1)},
 			}
-			fake := &fakeDNSRecordAPI{getRecord: cfRecord, updateRecord: cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID}}
+			fake := &fakeDNSRecordAPI{getRecord: cfRecord, updateRecord: cf.DNSRecord{ID: dnsFakeRecordID}}
 			r := reconcilerWithFakeDNSAPI(fake)
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: recordKey})
 			Expect(err).NotTo(HaveOccurred())
@@ -778,7 +778,7 @@ var _ = Describe("DNSRecord Controller", func() {
 			Expect(k8sClient.Update(ctx, rec)).To(Succeed())
 
 			// CF has different content (auto-formatted by CF for SRV), but TTL matches.
-			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID, Name: "_http._tcp.example.com", Type: "SRV", Content: "cf-auto-formatted-content", TTL: 300}
+			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, Name: "_http._tcp.example.com", Type: "SRV", Content: "cf-auto-formatted-content", TTL: 300}
 			fake := &fakeDNSRecordAPI{getRecord: cfRecord}
 			r := reconcilerWithFakeDNSAPI(fake)
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: recordKey})
@@ -799,7 +799,7 @@ var _ = Describe("DNSRecord Controller", func() {
 
 			notFoundErrVal := cf.NewNotFoundError(&cf.Error{StatusCode: 404, Type: cf.ErrorTypeNotFound})
 			notFoundErr := &notFoundErrVal
-			recreated := cf.DNSRecord{ID: "new-record-abc", ZoneID: dnsFakeZoneID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300}
+			recreated := cf.DNSRecord{ID: "new-record-abc", Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300}
 			fake := &fakeDNSRecordAPI{
 				getErr:       notFoundErr,
 				listRecords:  []cf.DNSRecord{},
@@ -895,7 +895,7 @@ var _ = Describe("DNSRecord Controller", func() {
 			Expect(k8sClient.Update(ctx, record)).To(Succeed())
 
 			// CF has different content → drift → update → returns error.
-			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID, Name: dnsRecordName, Type: dnsRecordType, Content: "9.9.9.9", TTL: 300}
+			cfRecord := cf.DNSRecord{ID: dnsFakeRecordID, Name: dnsRecordName, Type: dnsRecordType, Content: "9.9.9.9", TTL: 300}
 			fake := &fakeDNSRecordAPI{
 				getRecord: cfRecord,
 				updateErr: errors.New("upstream timeout"),
@@ -1078,7 +1078,7 @@ var _ = Describe("DNSRecord Controller", func() {
 
 			// CF returns the data field matching what was sent.
 			srvData := map[string]interface{}{"port": float64(8080), "weight": float64(1)}
-			created := cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID, Name: "_http._tcp.example.com", Type: "SRV", TTL: 300, Data: srvData}
+			created := cf.DNSRecord{ID: dnsFakeRecordID, Name: "_http._tcp.example.com", Type: "SRV", TTL: 300, Data: srvData}
 			fake := &fakeDNSRecordAPI{listRecords: []cf.DNSRecord{}, createRecord: created}
 			r := reconcilerWithFakeDNSAPI(fake)
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: recordKey})
@@ -1217,7 +1217,7 @@ var _ = Describe("DNSRecord Controller", func() {
 			record.Finalizers = []string{reconciler.Finalizer}
 			Expect(k8sClient.Update(ctx, record)).To(Succeed())
 
-			created := cf.DNSRecord{ID: dnsFakeRecordID, ZoneID: dnsFakeZoneID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300}
+			created := cf.DNSRecord{ID: dnsFakeRecordID, Name: dnsRecordName, Type: dnsRecordType, Content: dnsRecordIP, TTL: 300}
 			fake := &fakeDNSRecordAPI{listRecords: []cf.DNSRecord{}, createRecord: created}
 			r := reconcilerWithFakeDNSAPI(fake)
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: recordKey})

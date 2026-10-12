@@ -188,7 +188,7 @@ func (r *DNSRecordReconciler) syncDNSRecord(
 
 	// Sync status from Cloudflare.
 	record.Status.CloudflareMetadata.RecordID = cfRecord.ID
-	record.Status.CloudflareMetadata.ZoneID = cfRecord.ZoneID
+	record.Status.CloudflareMetadata.ZoneID = zoneID
 	record.Status.CloudflareMetadata.Proxiable = cfRecord.Proxiable
 	return ctrl.Result{}, updateReady(ctx, r.Client, record, "Synced", "DNS record is synced with Cloudflare")
 }
