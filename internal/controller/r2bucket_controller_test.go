@@ -60,20 +60,6 @@ func newFakeR2BucketAPI(existing ...cf.R2Bucket) *fakeR2BucketAPI {
 	return f
 }
 
-// r2Error builds the error cloudflare-go returns for an R2 API failure with
-// HTTP status and Cloudflare error code.
-func r2Error(status, code int) error {
-	e := &cf.Error{StatusCode: status, ErrorCodes: []int{code}}
-	if status == 404 {
-		e.Type = cf.ErrorTypeNotFound
-		v := cf.NewNotFoundError(e)
-		return &v
-	}
-	e.Type = cf.ErrorTypeRequest
-	v := cf.NewRequestError(e)
-	return &v
-}
-
 func (f *fakeR2BucketAPI) record(rc *cf.ResourceContainer) error {
 	f.accountIDs = append(f.accountIDs, rc.Identifier)
 	if rc.Identifier == "" {
@@ -91,7 +77,7 @@ func (f *fakeR2BucketAPI) GetR2Bucket(_ context.Context, rc *cf.ResourceContaine
 	}
 	b, ok := f.buckets[bucketName]
 	if !ok {
-		return cf.R2Bucket{}, r2Error(404, 10006)
+		return cf.R2Bucket{}, cloudflareError(404, 10006)
 	}
 	return b, nil
 }
@@ -105,7 +91,7 @@ func (f *fakeR2BucketAPI) CreateR2Bucket(_ context.Context, rc *cf.ResourceConta
 		return cf.R2Bucket{}, f.createErr
 	}
 	if _, ok := f.buckets[params.Name]; ok {
-		return cf.R2Bucket{}, r2Error(409, 10004)
+		return cf.R2Bucket{}, cloudflareError(409, 10004)
 	}
 	location := "ENAM"
 	if params.LocationHint != "" {
@@ -128,10 +114,10 @@ func (f *fakeR2BucketAPI) DeleteR2Bucket(_ context.Context, rc *cf.ResourceConta
 		return f.deleteErr
 	}
 	if _, ok := f.buckets[bucketName]; !ok {
-		return r2Error(404, 10006)
+		return cloudflareError(404, 10006)
 	}
 	if f.objects[bucketName] > 0 {
-		return r2Error(409, r2BucketNotEmptyCode)
+		return cloudflareError(409, r2BucketNotEmptyCode)
 	}
 	delete(f.buckets, bucketName)
 	return nil
@@ -397,7 +383,7 @@ var _ = Describe("R2Bucket Controller", func() {
 		It("sets TerminalError when Cloudflare rejects the bucket", func() {
 			createAccount(true)
 			createR2(r2Name, accountName, nil)
-			fake.createErr = r2Error(400, 10005)
+			fake.createErr = cloudflareError(400, 10005)
 			result, err := reconcileR2()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.IsZero()).To(BeTrue())
