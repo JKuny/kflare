@@ -26,6 +26,7 @@ func TestConditionAccessors(t *testing.T) {
 		"WorkerRoute":         &WorkerRoute{},
 		"KVNamespace":         &KVNamespace{},
 		"R2Bucket":            &R2Bucket{},
+		"WAFCustomRule":       &WAFCustomRule{},
 	}
 	want := []metav1.Condition{{Type: ConditionReady, Status: metav1.ConditionTrue, Reason: "Synced"}}
 	for kind, obj := range objects {
@@ -34,5 +35,14 @@ func TestConditionAccessors(t *testing.T) {
 		if len(got) != 1 || got[0] != want[0] {
 			t.Errorf("%s: GetConditions() = %v, want %v", kind, got, want)
 		}
+	}
+}
+
+func TestRulesetRuleAccessors(t *testing.T) {
+	rule := &WAFCustomRule{}
+	rule.GetRulesetRuleSpec().Expression = "true"
+	rule.GetRulesetRuleStatus().CloudflareMetadata.RuleID = "r1"
+	if rule.Spec.Expression != "true" || rule.Status.CloudflareMetadata.RuleID != "r1" {
+		t.Errorf("the accessors do not return the rule's own spec and status: %+v", rule)
 	}
 }

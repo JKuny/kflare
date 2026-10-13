@@ -33,6 +33,7 @@ rules:
   - r2buckets
   - tunnelconfigurations
   - tunnels
+  - wafcustomrules
   - workerroutes
   - workerscripts
   - zones
@@ -53,6 +54,7 @@ rules:
   - r2buckets/finalizers
   - tunnelconfigurations/finalizers
   - tunnels/finalizers
+  - wafcustomrules/finalizers
   - workerroutes/finalizers
   - workerscripts/finalizers
   - zones/finalizers
@@ -67,6 +69,7 @@ rules:
   - r2buckets/status
   - tunnelconfigurations/status
   - tunnels/status
+  - wafcustomrules/status
   - workerroutes/status
   - workerscripts/status
   - zones/status

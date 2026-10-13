@@ -11,7 +11,8 @@ Secret (API token)
   └─ CloudflareAccount (cluster-scoped)
        ├─ Zone (namespaced)
        │    ├─ DNSRecord (same namespace, via zoneRef)
-       │    └─ WorkerRoute (same namespace, via zoneRef; runs a WorkerScript)
+       │    ├─ WorkerRoute (same namespace, via zoneRef; runs a WorkerScript)
+       │    └─ WAFCustomRule (same namespace, via zoneRef)
        ├─ Tunnel (namespaced)
        │    └─ TunnelConfiguration (same namespace, via tunnelRef)
        ├─ WorkerScript (namespaced; binds KVNamespaces via kvNamespaceRef, R2Buckets via r2BucketRef)
@@ -34,12 +35,14 @@ Every controller follows the same shape:
 2. Add the `kflare.dev/finalizer` finalizer and return; the update re-triggers the reconcile.
 3. Resolve the parent resource and credentials. If the parent is missing or not ready, report `Ready=False` and wait
    for the parent's watch event.
-4. Observe: fetch the Cloudflare resource by the ID stored in status. If there is no ID, or Cloudflare says it no longer
-   exists, find an existing resource to adopt or create a new one (see [Adoption and ownership](#adoption-and-ownership)).
+4. Observe: fetch the Cloudflare resource by the ID stored in status (a rule: by its ref, see [Rules](#rules)). If there
+   is no ID, or Cloudflare says it no longer exists, find an existing resource to adopt or create a new one (see
+   [Adoption and ownership](#adoption-and-ownership)).
 5. Compare the spec with what Cloudflare reported, and write to Cloudflare only when they differ.
 6. Record IDs and metadata in status and set `Ready=True`.
 
-Step 5 is deliberate: an idle reconcile makes read calls only. The live e2e suite checks this for DNSRecord, and
+Step 5 is deliberate: an idle reconcile makes read calls only. The live e2e suite checks this for DNSRecord and
+WAFCustomRule, and
 TunnelConfiguration's comparison ignores fields Cloudflare adds on its own so an unchanged config does not bump its
 version.
 
@@ -77,6 +80,7 @@ What each controller compares when it does reconcile:
 | `KVNamespace` | Title (renamed in place); recreated, empty, if deleted externally |
 | `R2Bucket` | Existence only: recreated, empty, if deleted externally. Its name cannot change and its location is fixed at creation. Workers bind a bucket by name, so they keep working with the recreated bucket without a re-upload (verified live) |
 | `WorkerRoute` | Pattern and the Worker it runs; recreated if deleted externally, including when Cloudflare deletes it together with its Worker |
+| `WAFCustomRule` | The rule's whole definition: expression, action and its parameters, enabled, description. Also its place among kflare's rules in the zone (see [Rules](#rules)). Recreated if deleted externally |
 
 ## Adoption and ownership
 
@@ -98,6 +102,7 @@ retain policy first (see [Deletion](#deletion)).
 | `KVNamespace` | The namespace with the same title in the account (titles are unique per account) unless another KVNamespace manages it, in which case it reports `TitleConflict` and retries every minute. |
 | `R2Bucket` | The bucket named `spec.name` in the account's default jurisdiction (names are unique per account) unless another R2Bucket for the same Cloudflare account manages it, in which case it reports `NameConflict` and retries every minute. An adopted bucket keeps its location; `spec.locationHint` only applies when kflare creates the bucket. |
 | `WorkerRoute` | The route with the same pattern in the zone (patterns are unique per zone) unless another WorkerRoute manages it, in which case the WorkerRoute reports `PatternConflict` and retries every minute. |
+| `WAFCustomRule` | Nothing. A rule is kflare's only if it carries the ref kflare derives for the resource (see [Rules](#rules)); rules created outside kflare are never touched. |
 
 ### DNSRecord, WorkerRoute, KVNamespace and R2Bucket ownership
 
@@ -116,6 +121,26 @@ This prevents two DNSRecords from fighting over one record. It does **not** prot
 kflare: a lone record with a matching name and type is adopted and overwritten. Tools such as external-dns avoid this
 with a TXT ownership registry; kflare currently does not.
 
+### Rules
+
+A `WAFCustomRule` manages one rule in its zone's entry point ruleset for a Rulesets API phase:
+`http_request_firewall_custom`, the zone's WAF custom rules. The rate limiting, managed ruleset and Rules kinds planned
+next work the same way (`internal/controller/rulesetrule.go`, `rulesetrule_controller.go`). A zone has one entry point
+per phase, shared by every rule in that phase, kflare's or not, so kflare:
+
+- Marks each rule it manages with a ref, `kflare-` and the first 32 hex characters of the SHA-256 of
+  `<kind>/<namespace>/<name>`, and finds its rule by that ref. The marker is on the Cloudflare side, and because it is
+  derived from the resource's identity rather than its UID, a resource restored from a backup finds its rule again.
+  A rule without such a ref is never adopted, changed or deleted.
+- Writes one rule at a time, and creates the entry point only when the zone has none. It never replaces an entry point
+  as a whole: that would replace the rules it does not manage.
+- Keeps its own rules in a zone and phase in order of `spec.priority`, lower first, with ties broken by namespace and
+  name, across namespaces (two Zones in different namespaces can point at the same Cloudflare zone). Rules created
+  outside kflare keep their place. Reordering moves rules without changing them: Cloudflare keeps a moved rule's
+  definition and version (verified live). A reconcile that moved rules checks the order again 10 seconds later, in
+  case another resource was reordering the same rules at the same time.
+- Leaves the entry point in place when its last rule is deleted, as Cloudflare does.
+
 ## Error handling
 
 `pkg/cloudflare.IsTerminalError` sorts Cloudflare errors into two groups, and `handleCloudflareError` acts on them:
@@ -129,6 +154,10 @@ with a TXT ownership registry; kflare currently does not.
 
 cloudflare-go names its 401 error `AuthorizationError` and its 403 error `AuthenticationError`, the reverse of what the
 names suggest; `pkg/cloudflare/errors.go` documents the mapping.
+
+The Rulesets API reports what the zone's plan does not allow (a regular expression, the Log action, a custom block
+response, more rules than the plan allows) as a 400, often without an error code. These are terminal like any other
+4xx, and the condition carries Cloudflare's message.
 
 Failures caused by something a resource does not watch, such as a missing account or token Secret, retry every minute
 with reason `AccountNotFound`, `AccountNotReady`, `SecretNotFound` or `TokenKeyMissing`. Terminal errors are also
@@ -155,6 +184,7 @@ Per-resource details:
   still references it reports `WorkerScriptNotFound` and recreates its route once the Worker is uploaded again.
 - **KVNamespace** deletion deletes the namespace **and all of its data**. Set the retain policy on namespaces holding data
   you need to keep.
+- **WAFCustomRule** deletion deletes its rule, found by its ref. The zone's other rules and its entry point stay.
 - **R2Bucket** deletion deletes only an empty bucket: kflare never deletes objects. Cloudflare refuses to delete a bucket
   that holds objects (409, code 10008), so the R2Bucket keeps its finalizer and reports `BucketNotEmpty`, checking again
   every minute until the bucket is emptied or the retain policy is set.
@@ -165,7 +195,7 @@ resource that still needs its parent for its own cleanup. Parents therefore keep
 (`internal/controller/protection.go`):
 
 - A `CloudflareAccount` waits for the Zones, Tunnels, WorkerScripts, KVNamespaces and R2Buckets that reference it.
-- A `Zone` waits for its DNSRecords and WorkerRoutes.
+- A `Zone` waits for its DNSRecords, WorkerRoutes and WAFCustomRules.
 - A `Tunnel` waits for its TunnelConfigurations.
 - A `KVNamespace` waits for the WorkerScripts bound to it through `kvNamespaceRef`. Cloudflare deletes a namespace a
   Worker is bound to, but every later upload of that Worker then fails.
@@ -176,7 +206,8 @@ resource that still needs its parent for its own cleanup. Parents therefore keep
 Each child therefore cleans up with its own deletion policy even when its parent is retained. The live e2e suite deletes
 everything in one pass and checks Cloudflare afterwards.
 
-A DNSRecord, WorkerRoute or TunnelConfiguration whose parent is nevertheless gone (its finalizer was removed by hand)
+A DNSRecord, WorkerRoute, WAFCustomRule or TunnelConfiguration whose parent is nevertheless gone (its finalizer was
+removed by hand)
 cannot resolve credentials. It skips the Cloudflare call so its own deletion does not hang, and leaves its Cloudflare
 object in place.
 
@@ -188,8 +219,11 @@ object in place.
 - **Adoption is implicit.** Zone, DNSRecord, Tunnel, WorkerRoute, KVNamespace and R2Bucket adopt matching objects
   automatically, WorkerScript overwrites a same-named Worker, and the default deletion policy applies to adopted objects.
   An explicit opt-in for adopting objects kflare did not create would make this safer.
-- **No ownership marker on the Cloudflare side.** kflare tracks what it owns only in Kubernetes. If the cluster's
-  resources are lost, kflare cannot tell its objects apart from anyone else's.
+- **No ownership marker on the Cloudflare side, except for rules.** kflare tracks what it owns only in Kubernetes, so if
+  the cluster's resources are lost, it cannot tell its objects apart from anyone else's. Rules are the exception: their
+  ref marks them (see [Rules](#rules)).
+- **Rule order covers kflare's rules only.** A rule created outside kflare keeps its place, so it cannot be ordered
+  relative to kflare's rules.
 - **Pinned to the legacy SDK.** kflare uses cloudflare-go v0.119, the newest of the v0 line. Some limitations come
   from it: Tunnel renames are impossible because `UpdateTunnel` omits the tunnel ID from the request path,
   `originRequest` timeouts are not exposed because `TunnelDuration` does not round-trip, and R2Bucket manages buckets

@@ -9,8 +9,10 @@ package e2e
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"slices"
 	"time"
 
 	cf "github.com/cloudflare/cloudflare-go"
@@ -33,6 +35,9 @@ import (
 const (
 	// e2eNamespace holds the namespaced resources the Cloudflare specs create.
 	e2eNamespace = "kflare-e2e"
+
+	// customRulesPhase is the Rulesets phase of WAF custom rules.
+	customRulesPhase = "http_request_firewall_custom"
 
 	// e2eTimeout bounds each wait for the manager or Cloudflare to converge.
 	e2eTimeout = 2 * time.Minute
@@ -57,7 +62,7 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		zoneName  string
 
 		accountKey, tunnelKey, tunnelConfigKey, workerKey, zoneKey, recordKey client.ObjectKey
-		routeKey, exclusionKey, kvKey, bucketKey                              client.ObjectKey
+		routeKey, exclusionKey, kvKey, bucketKey, wafKey, wafSkipKey          client.ObjectKey
 
 		tunnelID, zoneID, recordID, routeID, exclusionID, kvNamespaceID string
 	)
@@ -116,6 +121,8 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		exclusionKey = client.ObjectKey{Namespace: e2eNamespace, Name: "route-exclusion"}
 		kvKey = client.ObjectKey{Namespace: e2eNamespace, Name: "kv"}
 		bucketKey = client.ObjectKey{Namespace: e2eNamespace, Name: "bucket"}
+		wafKey = client.ObjectKey{Namespace: e2eNamespace, Name: "waf-block"}
+		wafSkipKey = client.ObjectKey{Namespace: e2eNamespace, Name: "waf-skip"}
 
 		DeferCleanup(func() {
 			By("removing anything this run left behind in Cloudflare")
@@ -128,6 +135,9 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 			}
 			if err := cfAPI.DeleteR2Bucket(ctx, accountRC, resourceName()); err != nil && !cfpkg.IsNotFound(err) {
 				GinkgoWriter.Printf("cleanup: deleting R2 bucket %s: %v\n", resourceName(), err)
+			}
+			if zoneID != "" {
+				cleanupRules(ctx, cfAPI, zoneID, wafRef(wafKey), wafRef(wafSkipKey))
 			}
 		})
 
@@ -356,6 +366,65 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		Expect(cfExclusion.ScriptName).To(BeEmpty())
 	})
 
+	It("writes WAF custom rules in priority order and leaves them alone once they are in sync", func() {
+		if zoneName == "" {
+			Skip("CF_E2E_ZONE is not set")
+		}
+		path := "/" + resourceName()
+		block := &cloudflarev1alpha1.WAFCustomRule{
+			ObjectMeta: objectMeta(wafKey),
+			Spec: cloudflarev1alpha1.WAFCustomRuleSpec{
+				RulesetRuleSpec: cloudflarev1alpha1.RulesetRuleSpec{
+					ZoneRef:     corev1.LocalObjectReference{Name: zoneKey.Name},
+					Expression:  `starts_with(http.request.uri.path, "` + path + `")`,
+					Description: "kflare e2e " + run,
+					Priority:    10,
+				},
+				Action: "block",
+			},
+		}
+		Expect(k8s.Create(ctx, block)).To(Succeed())
+		expectReady(wafKey, block, func() []metav1.Condition { return block.Status.Conditions })
+		Expect(block.Status.CloudflareMetadata.Ref).To(Equal(wafRef(wafKey)))
+
+		By("adding a skip rule with a lower priority, which kflare places before the block rule")
+		skip := &cloudflarev1alpha1.WAFCustomRule{
+			ObjectMeta: objectMeta(wafSkipKey),
+			Spec: cloudflarev1alpha1.WAFCustomRuleSpec{
+				RulesetRuleSpec: cloudflarev1alpha1.RulesetRuleSpec{
+					ZoneRef:    corev1.LocalObjectReference{Name: zoneKey.Name},
+					Expression: `http.request.uri.path eq "` + path + `/health"`,
+				},
+				Action: "skip",
+				Skip:   &cloudflarev1alpha1.WAFCustomRuleSkip{RemainingRules: true},
+			},
+		}
+		Expect(k8s.Create(ctx, skip)).To(Succeed())
+		expectReady(wafSkipKey, skip, func() []metav1.Condition { return skip.Status.Conditions })
+
+		rules := customRules(ctx, cfAPI, zoneID)
+		refs := make([]string, len(rules))
+		for i, rule := range rules {
+			refs[i] = rule.Ref
+		}
+		Expect(slices.Index(refs, wafRef(wafSkipKey))).To(BeNumerically(">=", 0), "the skip rule is missing: %v", refs)
+		Expect(slices.Index(refs, wafRef(wafSkipKey))).To(BeNumerically("<", slices.Index(refs, wafRef(wafKey))))
+		blockRule := rules[slices.Index(refs, wafRef(wafKey))]
+		Expect(blockRule.ID).To(Equal(block.Status.CloudflareMetadata.RuleID))
+		Expect(blockRule.Action).To(Equal("block"))
+		Expect(blockRule.Expression).To(Equal(block.Spec.Expression))
+		Expect(blockRule.Description).To(Equal(block.Spec.Description))
+
+		By("re-triggering the reconcile and checking the ruleset is not written to again")
+		version := customRulesVersion(ctx, cfAPI, zoneID)
+		patch := client.MergeFrom(block.DeepCopy())
+		block.Annotations = map[string]string{"e2e.kflare.dev/touched": time.Now().Format(time.RFC3339)}
+		Expect(k8s.Patch(ctx, block, patch)).To(Succeed())
+		Consistently(func() string {
+			return customRulesVersion(ctx, cfAPI, zoneID)
+		}, 15*time.Second, 3*time.Second).Should(Equal(version))
+	})
+
 	It("removes everything from Cloudflare when everything is deleted at once", func() {
 
 		// One delete for everything, in no particular order, like `kubectl delete
@@ -365,6 +434,8 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		everything := []client.Object{
 			&cloudflarev1alpha1.WorkerRoute{ObjectMeta: objectMeta(routeKey)},
 			&cloudflarev1alpha1.WorkerRoute{ObjectMeta: objectMeta(exclusionKey)},
+			&cloudflarev1alpha1.WAFCustomRule{ObjectMeta: objectMeta(wafKey)},
+			&cloudflarev1alpha1.WAFCustomRule{ObjectMeta: objectMeta(wafSkipKey)},
 			&cloudflarev1alpha1.DNSRecord{ObjectMeta: objectMeta(recordKey)},
 			&cloudflarev1alpha1.TunnelConfiguration{ObjectMeta: objectMeta(tunnelConfigKey)},
 			&cloudflarev1alpha1.WorkerScript{ObjectMeta: objectMeta(workerKey)},
@@ -399,6 +470,9 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 			for _, id := range routeIDs(routeID, exclusionID) {
 				_, err = cfAPI.GetWorkerRoute(ctx, cf.ZoneIdentifier(zoneID), id)
 				Expect(cfpkg.IsNotFound(err)).To(BeTrue(), "route %s was not deleted: %v", id, err)
+			}
+			for _, rule := range customRules(ctx, cfAPI, zoneID) {
+				Expect(rule.Ref).NotTo(BeElementOf(wafRef(wafKey), wafRef(wafSkipKey)), "rule %s was not deleted", rule.ID)
 			}
 			_, err = cfAPI.ZoneDetails(ctx, zoneID)
 			Expect(err).NotTo(HaveOccurred(), "the retained zone must still exist")
@@ -481,4 +555,56 @@ func routeIDs(ids ...string) []string {
 		}
 	}
 	return out
+}
+
+// wafRef is the ref of the rule the WAFCustomRule at key manages: "kflare-"
+// and the first 32 hex characters of the SHA-256 of kind/namespace/name, as
+// ARCHITECTURE.md documents it. It is computed here independently, to check
+// the controller keeps to it.
+func wafRef(key client.ObjectKey) string {
+	sum := sha256.Sum256([]byte("WAFCustomRule/" + key.Namespace + "/" + key.Name))
+	return "kflare-" + hex.EncodeToString(sum[:16])
+}
+
+// customRules returns the zone's WAF custom rules in order, or none when the
+// zone has no entry point for them.
+func customRules(ctx context.Context, api *cf.API, zoneID string) []cf.RulesetRule {
+	ruleset, err := api.GetEntrypointRuleset(ctx, cf.ZoneIdentifier(zoneID), customRulesPhase)
+	if cfpkg.IsNotFound(err) {
+		return nil
+	}
+	Expect(err).NotTo(HaveOccurred())
+	return ruleset.Rules
+}
+
+// customRulesVersion returns the version of the zone's WAF custom rules
+// entry point, which Cloudflare bumps on every write.
+func customRulesVersion(ctx context.Context, api *cf.API, zoneID string) string {
+	ruleset, err := api.GetEntrypointRuleset(ctx, cf.ZoneIdentifier(zoneID), customRulesPhase)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(ruleset.Version).NotTo(BeNil())
+	return *ruleset.Version
+}
+
+// cleanupRules deletes the WAF custom rules with refs from the zone. It
+// deletes through kflare's client: cloudflare-go's DeleteRulesetRule reports
+// an error even when the delete succeeds.
+func cleanupRules(ctx context.Context, api *cf.API, zoneID string, refs ...string) {
+	zrc := cf.ZoneIdentifier(zoneID)
+	ruleset, err := api.GetEntrypointRuleset(ctx, zrc, customRulesPhase)
+	if err != nil {
+		if !cfpkg.IsNotFound(err) {
+			GinkgoWriter.Printf("cleanup: reading the WAF custom rules: %v\n", err)
+		}
+		return
+	}
+	for _, rule := range ruleset.Rules {
+		if !slices.Contains(refs, rule.Ref) {
+			continue
+		}
+		if _, err := (&cfpkg.Client{API: api}).DeleteRulesetRule(ctx, zrc, ruleset.ID, rule.ID); err != nil &&
+			!cfpkg.IsNotFound(err) {
+			GinkgoWriter.Printf("cleanup: deleting WAF custom rule %s: %v\n", rule.ID, err)
+		}
+	}
 }
