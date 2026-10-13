@@ -1,0 +1,118 @@
+/*
+Copyright 2026 Jonathan Graniero.
+
+SPDX-License-Identifier: MIT
+*/
+
+package v1alpha1
+
+import (
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// IPListIDLabel holds the ID of the Cloudflare IP list an IPList manages.
+// kflare sets it, and never adopts a list that another IPList already
+// carries in this label.
+const IPListIDLabel = "kflare.dev/ip-list-id"
+
+// IPListSpec defines the desired state of IPList: a custom IP list in a
+// Cloudflare account. Rule expressions in the account's zones refer to it as
+// $<name>, for example `ip.src in $office_ips`.
+type IPListSpec struct {
+	// AccountRef references the CloudflareAccount that owns the list.
+	// Immutable after creation.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="accountRef is immutable"
+	AccountRef corev1.LocalObjectReference `json:"accountRef"`
+
+	// Name is the list's name, unique in the account among lists of every
+	// kind: lowercase letters, digits and underscores, at most 50 characters.
+	// Immutable, because Cloudflare cannot rename a list.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9_]{1,50}$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="name is immutable"
+	Name string `json:"name"`
+
+	// Description is shown with the list in the Cloudflare dashboard.
+	// +optional
+	// +kubebuilder:validation:MaxLength=500
+	Description string `json:"description,omitempty"`
+
+	// Items are the addresses and ranges in the list. kflare replaces the
+	// list's items whenever they differ from these.
+	// +optional
+	// +listType=map
+	// +listMapKey=ip
+	Items []IPListItem `json:"items,omitempty"`
+}
+
+// IPListItem is one address or range in an IP list.
+type IPListItem struct {
+	// IP is an IPv4 or IPv6 address, or a CIDR range without host bits set:
+	// /8 to /32 for IPv4, /12 to /128 for IPv6. Cloudflare refuses
+	// IPv4-mapped IPv6 addresses.
+	// +kubebuilder:validation:MaxLength=49
+	// +kubebuilder:validation:Pattern=`^[0-9a-fA-F:.]+(/[0-9]{1,3})?$`
+	IP string `json:"ip"`
+
+	// Comment describes the item in the Cloudflare dashboard.
+	// +optional
+	// +kubebuilder:validation:MaxLength=500
+	Comment string `json:"comment,omitempty"`
+}
+
+// IPListCloudflareMetadata holds identifiers returned by the Cloudflare API.
+type IPListCloudflareMetadata struct {
+	// ListID is the Cloudflare list identifier.
+	ListID string `json:"listID,omitempty"`
+
+	// NumItems is how many items the list held when it was last synced.
+	// +optional
+	NumItems int32 `json:"numItems"`
+
+	// OperationID is Cloudflare's bulk operation replacing the list's items,
+	// while kflare waits for it to finish.
+	OperationID string `json:"operationID,omitempty"`
+}
+
+// IPListStatus defines the observed state of IPList.
+type IPListStatus struct {
+	// Conditions represent the latest available observations of the list's state.
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// CloudflareMetadata holds identifiers returned by the Cloudflare API.
+	CloudflareMetadata IPListCloudflareMetadata `json:"cloudflareMetadata,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Namespaced,shortName=cfiplist
+// +kubebuilder:printcolumn:name="Name",type=string,JSONPath=`.spec.name`
+// +kubebuilder:printcolumn:name="Items",type=integer,JSONPath=`.status.cloudflareMetadata.numItems`
+// +kubebuilder:printcolumn:name="List ID",type=string,JSONPath=`.status.cloudflareMetadata.listID`
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+
+// IPList is the Schema for the iplists API.
+// It manages a custom IP list in a Cloudflare account.
+type IPList struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   IPListSpec   `json:"spec,omitempty"`
+	Status IPListStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// IPListList contains a list of IPList.
+type IPListList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []IPList `json:"items"`
+}
+
+func init() {
+	register(&IPList{}, &IPListList{})
+}

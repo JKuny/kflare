@@ -76,3 +76,9 @@ func (in *RateLimitRule) GetConditions() []metav1.Condition { return in.Status.C
 
 // SetConditions replaces the rate limiting rule's status conditions.
 func (in *RateLimitRule) SetConditions(c []metav1.Condition) { in.Status.Conditions = c }
+
+// GetConditions returns the IP list's status conditions.
+func (in *IPList) GetConditions() []metav1.Condition { return in.Status.Conditions }
+
+// SetConditions replaces the IP list's status conditions.
+func (in *IPList) SetConditions(c []metav1.Condition) { in.Status.Conditions = c }

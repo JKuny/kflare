@@ -27,8 +27,8 @@ import (
 // cleanup keeps its finalizer until they are gone, reporting Ready=False with
 // reason InUse meanwhile:
 //
-//   - a CloudflareAccount waits for the Zones, Tunnels and WorkerScripts that
-//     use its credentials;
+//   - a CloudflareAccount waits for the Zones, Tunnels, WorkerScripts,
+//     KVNamespaces, R2Buckets and IPLists that use its credentials;
 //   - a Zone waits for its DNSRecords, WorkerRoutes and rules
 //     (WAFCustomRules, RateLimitRules), which need its zone ID and account;
 //   - a Tunnel waits for its TunnelConfigurations;
@@ -78,6 +78,8 @@ var (
 			func(kv *cloudflarev1alpha1.KVNamespace) []string { return []string{kv.Spec.AccountRef.Name} }),
 		dependents("R2Bucket", func() client.ObjectList { return &cloudflarev1alpha1.R2BucketList{} },
 			func(b *cloudflarev1alpha1.R2Bucket) []string { return []string{b.Spec.AccountRef.Name} }),
+		dependents("IPList", func() client.ObjectList { return &cloudflarev1alpha1.IPListList{} },
+			func(l *cloudflarev1alpha1.IPList) []string { return []string{l.Spec.AccountRef.Name} }),
 	}
 
 	// zoneDependents live in a Zone's namespace and reference it by name.

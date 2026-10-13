@@ -1,0 +1,32 @@
+# The office's addresses, as a custom IP list that rule expressions in the
+# account's zones use as $office_ips. A Free account can have one IP list, of
+# up to 10,000 items.
+apiVersion: kflare.dev/v1alpha1
+kind: IPList
+metadata:
+  name: office-ips
+  namespace: default
+spec:
+  accountRef:
+    name: my-account
+  name: office_ips          # unique in the account: lowercase letters, digits and underscores
+  description: Office egress addresses
+  items:
+    - ip: 192.0.2.1
+      comment: Head office
+    - ip: 198.51.100.0/24   # a range: /8 to /32 for IPv4, /12 to /128 for IPv6
+      comment: Branch office
+    - ip: 2001:db8::/48
+---
+# Blocks the admin pages for everyone outside the office. Applied together with
+# the list, it is written once the list exists in Cloudflare.
+apiVersion: kflare.dev/v1alpha1
+kind: WAFCustomRule
+metadata:
+  name: example-office-only-admin
+  namespace: default
+spec:
+  zoneRef:
+    name: example-zone      # a Zone in the same namespace
+  expression: 'http.request.uri.path wildcard "/admin*" and not ip.src in $office_ips'
+  action: block

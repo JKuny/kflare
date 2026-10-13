@@ -159,6 +159,7 @@ var _ = Describe("CloudflareAccount deletion protection", func() {
 			zone,
 			&cloudflarev1alpha1.Tunnel{Spec: cloudflarev1alpha1.TunnelSpec{AccountRef: ref}},
 			&cloudflarev1alpha1.WorkerScript{Spec: cloudflarev1alpha1.WorkerScriptSpec{AccountRef: ref}},
+			&cloudflarev1alpha1.IPList{Spec: cloudflarev1alpha1.IPListSpec{AccountRef: ref}},
 		} {
 			Expect(r.deletingAccountOf(ctx, dependent)).To(ConsistOf(reconcile.Request{NamespacedName: acctKey}))
 		}
