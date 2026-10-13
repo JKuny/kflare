@@ -497,20 +497,26 @@ permission group names; deploy.md uses the dashboard's labels, so look those up 
 
 | Resource | Permission to document (least privilege) | Dev token today |
 |---|---|---|
-| `WAFCustomRule`, `RateLimitRule`, `ManagedRuleset` | Zone WAF Write | ✅ dry run accepted |
+| `WAFCustomRule`, `RateLimitRule`, `ManagedRuleset` | Zone WAF Write | ✅ dry run accepted; enough on its own for the first two (2026-10-13, see below) |
 | `TransformRule` | Zone Transform Rules Write | ✅ dry run accepted |
 | `RedirectRule` | Dynamic URL Redirects Write | ❌ 403, "request is not authorized" |
 | `CacheRule` | Cache Settings Write | ❌ 403 |
 | `ConfigurationRule` | Config Settings Write | ❌ 403 |
 | `OriginRule` | Origin Write | ❌ 403 |
 | `ManagedTransform` | Managed headers Write | ❌ Read only (not a Rulesets endpoint, so no dry run) |
-| `IPList` | Account Rule Lists Write (account) | ✅ create, replace and delete verified 2026-10-13 |
+| `IPList` | Account Rule Lists Write (account) | ✅ create, replace and delete verified 2026-10-13; enough on its own |
 | `AccessGroup`, `AccessPolicy`, `AccessApplication` | Access: Organizations, Identity Providers, and Groups Write; Access: Apps and Policies Write (account) | ✅, but Access is not enabled |
 
 - Adding a permission to the dev token needs the user's OK first, as with Workers Routes Write on 2026-10-05
-- Before deploy.md recommends a zone-level permission, check that it is enough on its own. The dev token's
-  account-level permissions already cover these phases, so it cannot show that; a second, narrower token can (ask
-  before creating one)
+- **deploy.md's permissions are enough on their own** (checked 2026-10-13, with the user's OK). An account-owned token
+  holding only Account Settings Read, Cloudflare Tunnel Write, Workers Scripts Write, Workers KV Storage Write,
+  Workers R2 Storage Write and Account Rule Lists Write on the account, and Zone Read, DNS Write, Workers Routes Write
+  and Zone WAF Write on `kflare.dev`, ran the whole live e2e suite (13 of 13, run `714bb3`), with no refusal in the
+  manager's log. It was refused for transform rules, account rulesets and API tokens. So Zone WAF Write alone covers
+  `WAFCustomRule` and `RateLimitRule`, and Zone Read is enough to adopt a zone. The token expired within 3 hours and
+  was deleted after the run
+- The dev token's account-level permissions cover more than deploy.md lists, so it cannot show that a permission is
+  enough. Check a new one with a short-lived token holding only deploy.md's permissions, as above (ask first)
 
 #### SDK decision
 **Status:** Accepted 2026-10-09. Step 1 is done: kflare uses cloudflare-go **v0.119.0**
@@ -787,8 +793,7 @@ creation, idle sync, placement, reordering, drift, deletion), and `WAFCustomRule
   product (20119); `logging` on any other action (20018); an expression that does not parse or is over 4096 characters
   (20127); a description over 4096 characters (20208)
 - `blockResponse` follows Cloudflare's documentation (Pro plans and up); it is not verified live, see Deferred
-- deploy.md documents Zone · Zone WAF · Edit. The dev token writes the phase through its account-level permissions, so
-  a token holding only that permission has not been tested (ask before creating one)
+- deploy.md documents Zone · Zone WAF · Edit, which is enough on its own (verified 2026-10-13, see Token permissions)
 
 #### Branch: `feat/rate-limit-rule-controller`
 **Depends on:** `feat/rulesets-foundation`
@@ -825,8 +830,7 @@ creation, idle sync, placement, reordering, drift, deletion), and `WAFCustomRule
   `requests_to_origin` and an empty counting expression; a non-empty one needs a higher plan
 - Stored as sent: characteristics keep the order sent; `requests_to_origin: false` and an empty counting expression
   come back absent, as cloudflare-go sends them
-- deploy.md documents Zone · Zone WAF · Edit, with the same caveat as `WAFCustomRule`: a token holding only that
-  permission has not been tested
+- deploy.md documents Zone · Zone WAF · Edit, which is enough on its own (verified 2026-10-13, see Token permissions)
 
 
 #### Branch: `feat/ip-list-controller`
@@ -876,7 +880,8 @@ An account-level custom IP list, for expressions such as `ip.src in $office_ips`
   uses: 400, 10041, "This list is referenced by at least one ruleset rule". The list's `num_referencing_filters` stays 0
   meanwhile, so it cannot tell kflare whether a rule uses the list
 - A rule that uses a list the account does not have: 400, 20127, "the list ... is unknown"
-- deploy.md documents Account · Account Rule Lists · Edit (the API's Account Rule Lists Write)
+- deploy.md documents Account · Account Rule Lists · Edit (the API's Account Rule Lists Write), which is enough on its
+  own (verified 2026-10-13, see Token permissions)
 
 
 #### Branch: `feat/zero-trust-controllers`
@@ -954,7 +959,8 @@ Each is the foundation plus typed action parameters. Together they replace Page 
 
 - [ ] Run the live e2e suite in GitHub Actions. The repo has no Actions secrets or variables yet (2026-10-09). Use a
   dedicated CI token holding only what the suite needs, not the dev token, which also holds Account API Tokens Write
-  and Registrar Domains Admin. Set the secrets `CF_API_TOKEN` and `CF_ACCOUNT_ID`, and the variable
+  and Registrar Domains Admin. What the suite needs is deploy.md's permissions, with Zone Read (verified 2026-10-13,
+  see Token permissions). Set the secrets `CF_API_TOKEN` and `CF_ACCOUNT_ID`, and the variable
   `CF_E2E_ZONE=kflare.dev`. A Free zone holds one rate limiting rule and a Free account one IP list, so runs must
   not overlap: give the workflow a `concurrency` group, and avoid local runs while it runs
 - [ ] Tag `v0.1.0`: `Chart.yaml` is already at 0.1.0 and no tag exists. The release workflow publishes the image and
