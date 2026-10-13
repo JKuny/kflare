@@ -38,6 +38,7 @@ Create an API token in the Cloudflare dashboard (**My Profile → API Tokens**, 
 | `KVNamespace` | Account · Workers KV Storage · Edit |
 | `R2Bucket` | Account · Workers R2 Storage · Edit |
 | `WAFCustomRule`, `RateLimitRule` | Zone · Zone WAF · Edit |
+| `IPList` | Account · Account Rule Lists · Edit |
 
 Scope zone permissions to the zones kflare should manage. Note the account ID, shown on the account's
 overview page.
@@ -129,6 +130,7 @@ Every other kind references the account (or a resource that does). Examples are 
 | `R2Bucket` | Namespaced | `accountRef`; WorkerScripts bind it with `r2BucketRef` | [R2 bucket](../config/samples/cloudflare_v1alpha1_r2bucket.yaml) |
 | `WAFCustomRule` | Namespaced | `zoneRef` (same namespace) | [block and skip rules](../config/samples/cloudflare_v1alpha1_wafcustomrule.yaml) |
 | `RateLimitRule` | Namespaced | `zoneRef` (same namespace) | [API rate limit](../config/samples/cloudflare_v1alpha1_ratelimitrule.yaml) |
+| `IPList` | Namespaced | `accountRef`; rule expressions use it as `$name` | [office addresses and a rule using them](../config/samples/cloudflare_v1alpha1_iplist.yaml) |
 
 Things to know before pointing kflare at existing infrastructure:
 
@@ -149,6 +151,12 @@ Things to know before pointing kflare at existing infrastructure:
   like WAF custom rules. Free zones allow one, which counts per IP address over 10 seconds and can only block.
   Cloudflare also counts per data center, and requires rules to say so: kflare adds `cf.colo.id` to
   `spec.characteristics` itself.
+- **IP lists.** An `IPList` manages a custom list in its account, adopting a list with the same name, and
+  replaces the list's items whenever they differ from `spec.items`. Rule expressions use it as
+  `$<spec.name>`. Cloudflare refuses a rule that uses a list the account does not have yet, and refuses to
+  delete a list that a rule uses: kflare writes such a rule once the list exists, and deletes the list once
+  its rules are gone (reporting `ListInUse` meanwhile). Free accounts can have one IP list, with up to
+  10,000 items.
 - **Immutable fields.** Names and references (`spec.name`, `accountRef`, `zoneRef`, DNS `type`, ...) cannot be
   changed. Create a new resource instead.
 
@@ -229,12 +237,13 @@ Order matters, because kflare's finalizers need the controller running to clean 
 
 1. **Delete your kflare resources while the controller is still running.** Each one deletes its Cloudflare
    object, or keeps it if annotated `retain`. The order does not matter: Zones wait for their records,
-   routes and rules, Tunnels for their configurations, KV namespaces and R2 buckets for the Workers bound to them,
-   accounts until nothing uses them, and token Secrets until no account uses them. An R2 bucket that still
-   holds objects is not deleted: empty it, or annotate the R2Bucket `retain`.
+   routes and rules, Tunnels for their configurations, KV namespaces and R2 buckets for the Workers bound
+   to them, IP lists for the rules that use them, accounts until nothing uses them, and token Secrets until
+   no account uses them. An R2 bucket that still holds objects is not deleted: empty it, or annotate the
+   R2Bucket `retain`.
 
    ```sh
-   kubectl delete zones.kflare.dev,dnsrecords.kflare.dev,workerroutes.kflare.dev,wafcustomrules.kflare.dev,ratelimitrules.kflare.dev,tunnels.kflare.dev,tunnelconfigurations.kflare.dev,workerscripts.kflare.dev,kvnamespaces.kflare.dev,r2buckets.kflare.dev --all -A
+   kubectl delete zones.kflare.dev,dnsrecords.kflare.dev,workerroutes.kflare.dev,wafcustomrules.kflare.dev,ratelimitrules.kflare.dev,iplists.kflare.dev,tunnels.kflare.dev,tunnelconfigurations.kflare.dev,workerscripts.kflare.dev,kvnamespaces.kflare.dev,r2buckets.kflare.dev --all -A
    kubectl delete cloudflareaccounts.kflare.dev --all
    ```
 
@@ -306,7 +315,9 @@ kubectl -n kflare-system logs deploy/kflare           # controller log (JSON)
 | `WorkerScriptNotFound`, `WorkerScriptNotReady`, `AccountMismatch` | The route's WorkerScript is missing, not uploaded yet, or in a different account than the zone | Check the WorkerScript; it must use the zone's account |
 | `TitleConflict` | Another `KVNamespace` already manages a namespace with this title | Keep one KVNamespace per title |
 | `KVNamespaceNotFound`, `KVNamespaceNotReady` | A WorkerScript's `kvNamespaceRef` names a missing or not-yet-ready KVNamespace | Check the KVNamespace; it must use the Worker's account |
-| `NameConflict` | Another `R2Bucket` already manages a bucket with this name in the same Cloudflare account | Keep one R2Bucket per bucket |
+| `NameConflict` | Another `R2Bucket` already manages a bucket with this name in the same Cloudflare account, another `IPList` a list with this name, or the account has a list of another kind with this name | Keep one R2Bucket per bucket and one IPList per list; list names are unique across list kinds |
 | `R2BucketNotFound`, `R2BucketNotReady` | A WorkerScript's `r2BucketRef` names a missing or not-yet-ready R2Bucket | Check the R2Bucket; it must use the Worker's account |
+| `ReplacingItems` | Cloudflare is replacing an `IPList`'s items in the background | Nothing: kflare checks again every 2 seconds |
+| `ListInUse` | A deleted `IPList`'s list is still used by a rule, and Cloudflare does not delete it until no rule does | Remove the `$name` from the rules that use it (a kflare rule's goes with its resource), or annotate the IPList `kflare.dev/deletion-policy: retain` to keep the list |
 | `BucketNotEmpty` | A deleted `R2Bucket`'s bucket still holds objects; kflare does not delete them | Empty the bucket, or annotate the R2Bucket `kflare.dev/deletion-policy: retain` to keep it |
 | `InUse` | A `CloudflareAccount`, `Zone`, `Tunnel`, `KVNamespace` or `R2Bucket` being deleted is still referenced | Delete the resources listed in the message |
