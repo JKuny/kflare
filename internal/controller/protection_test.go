@@ -24,7 +24,7 @@ import (
 )
 
 // These specs cover parents that wait for their dependents before they are
-// deleted: a Zone for its DNSRecords, WorkerRoutes and WAFCustomRules, a Tunnel for its
+// deleted: a Zone for its DNSRecords, WorkerRoutes and rules, a Tunnel for its
 // TunnelConfigurations. The CloudflareAccount case is in
 // cloudflareaccount_protection_test.go.
 var _ = Describe("Deletion protection for parents", func() {
@@ -84,10 +84,19 @@ var _ = Describe("Deletion protection for parents", func() {
 					Action: "block",
 				},
 			})
+			create(&cloudflarev1alpha1.RateLimitRule{
+				ObjectMeta: metav1.ObjectMeta{Name: "prot-ratelimit", Namespace: ns},
+				Spec: cloudflarev1alpha1.RateLimitRuleSpec{
+					RulesetRuleSpec: cloudflarev1alpha1.RulesetRuleSpec{
+						ZoneRef: corev1.LocalObjectReference{Name: zoneName}, Expression: "true",
+					},
+					RequestsPerPeriod: 5,
+				},
+			})
 			Expect(k8sClient.Delete(ctx, &cloudflarev1alpha1.Zone{ObjectMeta: metav1.ObjectMeta{Name: zoneName, Namespace: ns}})).To(Succeed())
 		})
 
-		It("waits for its DNSRecords, WorkerRoutes and WAFCustomRules, then deletes", func() {
+		It("waits for its DNSRecords, WorkerRoutes and rules, then deletes", func() {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: zoneKey})
 			Expect(err).NotTo(HaveOccurred())
 			zone := &cloudflarev1alpha1.Zone{}
@@ -96,11 +105,13 @@ var _ = Describe("Deletion protection for parents", func() {
 			Expect(cond.Message).To(ContainSubstring("DNSRecord default/prot-record"))
 			Expect(cond.Message).To(ContainSubstring("WorkerRoute default/prot-route"))
 			Expect(cond.Message).To(ContainSubstring("WAFCustomRule default/prot-waf"))
+			Expect(cond.Message).To(ContainSubstring("RateLimitRule default/prot-ratelimit"))
 			Expect(fake.deleteCalled).To(BeFalse())
 
 			forceDelete(ctx, &cloudflarev1alpha1.DNSRecord{}, types.NamespacedName{Name: "prot-record", Namespace: ns})
 			forceDelete(ctx, &cloudflarev1alpha1.WorkerRoute{}, types.NamespacedName{Name: "prot-route", Namespace: ns})
 			forceDelete(ctx, &cloudflarev1alpha1.WAFCustomRule{}, types.NamespacedName{Name: "prot-waf", Namespace: ns})
+			forceDelete(ctx, &cloudflarev1alpha1.RateLimitRule{}, types.NamespacedName{Name: "prot-ratelimit", Namespace: ns})
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: zoneKey})
 			Expect(err).NotTo(HaveOccurred())
 			expectGone(zoneKey, &cloudflarev1alpha1.Zone{})

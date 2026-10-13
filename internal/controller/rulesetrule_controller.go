@@ -27,11 +27,12 @@ import (
 	"github.com/JonathanGraniero/kflare/pkg/reconciler"
 )
 
-// Every rule kind (WAFCustomRule, and the kinds to come) reconciles the same
-// way: wait for the Zone, resolve the account's token, write the one rule the
-// resource manages with syncRulesetRule (rulesetrule.go), and delete it with
-// the resource. The kind's own controller supplies only what differs: its
-// phase and how its spec becomes a Cloudflare rule.
+// Every rule kind (WAFCustomRule, RateLimitRule, and the kinds to come)
+// reconciles the same way: wait for the Zone, resolve the account's token,
+// write the one rule the resource manages with syncRulesetRule
+// (rulesetrule.go), and delete it with the resource. The kind's own
+// controller supplies only what differs: its phase and how its spec becomes a
+// Cloudflare rule.
 
 // rulesetRuleRecheckInterval is how soon a resource that reordered rules
 // checks the order again: another resource may have been reordering the same
@@ -63,7 +64,7 @@ type rulesetRuleKind struct {
 
 // rulesetRuleKinds lists every rule kind. The rules of all the kinds that
 // share a phase are kept in one order (see syncRulesetRule).
-var rulesetRuleKinds = []rulesetRuleKind{wafCustomRuleKind}
+var rulesetRuleKinds = []rulesetRuleKind{wafCustomRuleKind, rateLimitRuleKind}
 
 // rulesetRuleReconciler reconciles the resources of one rule kind. Each kind's
 // exported reconciler delegates to one.

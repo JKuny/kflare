@@ -290,8 +290,13 @@ func copyRuleset(rs *cf.Ruleset) cf.Ruleset {
 
 // entrypoint returns the fake's entry point for the test phase.
 func (f *fakeRulesetAPI) entrypoint() *cf.Ruleset {
-	rs, ok := f.rulesets[rulesTestPhase]
-	Expect(ok).To(BeTrue(), "the zone has no entry point in the phase")
+	return f.entrypointIn(rulesTestPhase)
+}
+
+// entrypointIn returns the fake's entry point for phase.
+func (f *fakeRulesetAPI) entrypointIn(phase string) *cf.Ruleset {
+	rs, ok := f.rulesets[phase]
+	Expect(ok).To(BeTrue(), "the zone has no entry point in the %s phase", phase)
 	return rs
 }
 

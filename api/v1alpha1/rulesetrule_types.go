@@ -12,7 +12,7 @@ import (
 )
 
 // The types here are shared by every kind that manages one rule in a zone's
-// Rulesets API phase: WAFCustomRule, and the rate limiting, managed ruleset
+// Rulesets API phase: WAFCustomRule, RateLimitRule, and the managed ruleset
 // and Rules (transform, redirect, cache, configuration, origin) kinds to come.
 
 // RulesetRuleSpec holds the spec fields every rule kind shares. Each kind
@@ -85,3 +85,10 @@ func (in *WAFCustomRule) GetRulesetRuleSpec() *RulesetRuleSpec { return &in.Spec
 
 // GetRulesetRuleStatus returns the WAF custom rule's status.
 func (in *WAFCustomRule) GetRulesetRuleStatus() *RulesetRuleStatus { return &in.Status }
+
+// GetRulesetRuleSpec returns the spec fields the rate limiting rule shares
+// with every rule kind.
+func (in *RateLimitRule) GetRulesetRuleSpec() *RulesetRuleSpec { return &in.Spec.RulesetRuleSpec }
+
+// GetRulesetRuleStatus returns the rate limiting rule's status.
+func (in *RateLimitRule) GetRulesetRuleStatus() *RulesetRuleStatus { return &in.Status }

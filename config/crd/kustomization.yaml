@@ -12,6 +12,7 @@ resources:
 - bases/kflare.dev_kvnamespaces.yaml
 - bases/kflare.dev_r2buckets.yaml
 - bases/kflare.dev_wafcustomrules.yaml
+- bases/kflare.dev_ratelimitrules.yaml
 #+kubebuilder:scaffold:crdkustomizeresource
 
 #patches:

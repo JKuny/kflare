@@ -27,6 +27,7 @@ func TestConditionAccessors(t *testing.T) {
 		"KVNamespace":         &KVNamespace{},
 		"R2Bucket":            &R2Bucket{},
 		"WAFCustomRule":       &WAFCustomRule{},
+		"RateLimitRule":       &RateLimitRule{},
 	}
 	want := []metav1.Condition{{Type: ConditionReady, Status: metav1.ConditionTrue, Reason: "Synced"}}
 	for kind, obj := range objects {
@@ -39,10 +40,21 @@ func TestConditionAccessors(t *testing.T) {
 }
 
 func TestRulesetRuleAccessors(t *testing.T) {
-	rule := &WAFCustomRule{}
-	rule.GetRulesetRuleSpec().Expression = "true"
-	rule.GetRulesetRuleStatus().CloudflareMetadata.RuleID = "r1"
-	if rule.Spec.Expression != "true" || rule.Status.CloudflareMetadata.RuleID != "r1" {
-		t.Errorf("the accessors do not return the rule's own spec and status: %+v", rule)
+	waf, rateLimit := &WAFCustomRule{}, &RateLimitRule{}
+	rules := map[string]struct {
+		rule interface {
+			GetRulesetRuleSpec() *RulesetRuleSpec
+			GetRulesetRuleStatus() *RulesetRuleStatus
+		}
+		spec   *RulesetRuleSpec
+		status *RulesetRuleStatus
+	}{
+		"WAFCustomRule": {waf, &waf.Spec.RulesetRuleSpec, &waf.Status},
+		"RateLimitRule": {rateLimit, &rateLimit.Spec.RulesetRuleSpec, &rateLimit.Status},
+	}
+	for kind, r := range rules {
+		if r.rule.GetRulesetRuleSpec() != r.spec || r.rule.GetRulesetRuleStatus() != r.status {
+			t.Errorf("%s: the accessors do not return the rule's own spec and status", kind)
+		}
 	}
 }
