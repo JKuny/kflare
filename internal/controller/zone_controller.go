@@ -62,7 +62,7 @@ type ZoneReconciler struct {
 //+kubebuilder:rbac:groups=kflare.dev,resources=zones,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=kflare.dev,resources=zones/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=kflare.dev,resources=zones/finalizers,verbs=update
-//+kubebuilder:rbac:groups=kflare.dev,resources=dnsrecords;workerroutes;wafcustomrules,verbs=get;list;watch
+//+kubebuilder:rbac:groups=kflare.dev,resources=dnsrecords;workerroutes;wafcustomrules;ratelimitrules,verbs=get;list;watch
 //+kubebuilder:rbac:groups=kflare.dev,resources=cloudflareaccounts,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
@@ -271,8 +271,9 @@ func (r *ZoneReconciler) reconcileDelete(ctx context.Context, zone *cloudflarev1
 // SetupWithManager registers ZoneReconciler with the manager and adds a watch
 // on CloudflareAccount so that a change in account credentials automatically
 // re-triggers reconciliation of all zones that reference that account. It
-// also hears about deleted DNSRecords, WorkerRoutes and WAFCustomRules, so a
-// zone waiting for them to go is released as soon as the last one is gone.
+// also hears about deleted DNSRecords, WorkerRoutes and rules (WAFCustomRules,
+// RateLimitRules), so a zone waiting for them to go is released as soon as
+// the last one is gone.
 func (r *ZoneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	dependentDeleted := builder.WithPredicates(deletesOnly)
 	dependent := handler.EnqueueRequestsFromMapFunc(r.deletingZoneOf)
@@ -285,11 +286,12 @@ func (r *ZoneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&cloudflarev1alpha1.DNSRecord{}, dependent, dependentDeleted).
 		Watches(&cloudflarev1alpha1.WorkerRoute{}, dependent, dependentDeleted).
 		Watches(&cloudflarev1alpha1.WAFCustomRule{}, dependent, dependentDeleted).
+		Watches(&cloudflarev1alpha1.RateLimitRule{}, dependent, dependentDeleted).
 		Complete(r)
 }
 
-// deletingZoneOf maps the deletion of a DNSRecord, WorkerRoute or
-// WAFCustomRule to its Zone while that Zone is being deleted.
+// deletingZoneOf maps the deletion of a DNSRecord, WorkerRoute or rule to its
+// Zone while that Zone is being deleted.
 func (r *ZoneReconciler) deletingZoneOf(ctx context.Context, obj client.Object) []reconcile.Request {
 	return deletingParentOf(ctx, r.Client, obj,
 		func() client.Object { return &cloudflarev1alpha1.Zone{} }, true, zoneDependents)

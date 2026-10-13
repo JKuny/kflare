@@ -70,3 +70,9 @@ func (in *WAFCustomRule) GetConditions() []metav1.Condition { return in.Status.C
 
 // SetConditions replaces the WAF custom rule's status conditions.
 func (in *WAFCustomRule) SetConditions(c []metav1.Condition) { in.Status.Conditions = c }
+
+// GetConditions returns the rate limiting rule's status conditions.
+func (in *RateLimitRule) GetConditions() []metav1.Condition { return in.Status.Conditions }
+
+// SetConditions replaces the rate limiting rule's status conditions.
+func (in *RateLimitRule) SetConditions(c []metav1.Condition) { in.Status.Conditions = c }
