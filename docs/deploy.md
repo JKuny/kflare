@@ -37,6 +37,7 @@ Create an API token in the Cloudflare dashboard (**My Profile → API Tokens**, 
 | `WorkerRoute` | Zone · Workers Routes · Edit |
 | `KVNamespace` | Account · Workers KV Storage · Edit |
 | `R2Bucket` | Account · Workers R2 Storage · Edit |
+| `WAFCustomRule` | Zone · Zone WAF · Edit |
 
 Scope zone permissions to the zones kflare should manage. Note the account ID, shown on the account's
 overview page.
@@ -61,7 +62,7 @@ helm install kflare ./helm/kflare \
 
 The chart installs:
 
-- the six kflare CRDs (kept on uninstall, see [Uninstalling](#uninstalling))
+- the kflare CRDs (kept on uninstall, see [Uninstalling](#uninstalling))
 - the controller Deployment, ServiceAccount and a Service for metrics
 - a ClusterRole for the controller, plus a Role for leader election in the release namespace
 - `view`/`edit` aggregation roles (see [Security model](#security-model))
@@ -126,6 +127,7 @@ Every other kind references the account (or a resource that does). Examples are 
 | `WorkerRoute` | Namespaced | `zoneRef`, optional `workerScriptRef` (same namespace) | [route and exclusion](../config/samples/cloudflare_v1alpha1_workerroute.yaml) |
 | `KVNamespace` | Namespaced | `accountRef`; WorkerScripts bind it with `kvNamespaceRef` | [KV namespace](../config/samples/cloudflare_v1alpha1_kvnamespace.yaml) |
 | `R2Bucket` | Namespaced | `accountRef`; WorkerScripts bind it with `r2BucketRef` | [R2 bucket](../config/samples/cloudflare_v1alpha1_r2bucket.yaml) |
+| `WAFCustomRule` | Namespaced | `zoneRef` (same namespace) | [block and skip rules](../config/samples/cloudflare_v1alpha1_wafcustomrule.yaml) |
 
 Things to know before pointing kflare at existing infrastructure:
 
@@ -138,6 +140,10 @@ Things to know before pointing kflare at existing infrastructure:
   empty; until then it reports `BucketNotEmpty`. Use `retain` to keep a bucket and its objects.
 - **KV data.** Deleting a `KVNamespace` deletes the namespace and everything stored in it. Use `retain` on
   namespaces holding data you need.
+- **WAF custom rules.** Each `WAFCustomRule` manages one rule in its zone, which kflare marks with a ref
+  derived from the resource's namespace and name. kflare never adopts or changes rules it did not create,
+  and keeps its own rules in `spec.priority` order (lower first) while other rules keep their place. Free
+  zones allow 5 custom rules, without regular expressions.
 - **Immutable fields.** Names and references (`spec.name`, `accountRef`, `zoneRef`, DNS `type`, ...) cannot be
   changed. Create a new resource instead.
 
@@ -217,13 +223,13 @@ exist, short names such as `kubectl get cloudflareaccounts` can resolve to eithe
 Order matters, because kflare's finalizers need the controller running to clean up:
 
 1. **Delete your kflare resources while the controller is still running.** Each one deletes its Cloudflare
-   object, or keeps it if annotated `retain`. The order does not matter: Zones wait for their records and
-   routes, Tunnels for their configurations, KV namespaces and R2 buckets for the Workers bound to them,
+   object, or keeps it if annotated `retain`. The order does not matter: Zones wait for their records,
+   routes and WAF custom rules, Tunnels for their configurations, KV namespaces and R2 buckets for the Workers bound to them,
    accounts until nothing uses them, and token Secrets until no account uses them. An R2 bucket that still
    holds objects is not deleted: empty it, or annotate the R2Bucket `retain`.
 
    ```sh
-   kubectl delete zones.kflare.dev,dnsrecords.kflare.dev,workerroutes.kflare.dev,tunnels.kflare.dev,tunnelconfigurations.kflare.dev,workerscripts.kflare.dev,kvnamespaces.kflare.dev,r2buckets.kflare.dev --all -A
+   kubectl delete zones.kflare.dev,dnsrecords.kflare.dev,workerroutes.kflare.dev,wafcustomrules.kflare.dev,tunnels.kflare.dev,tunnelconfigurations.kflare.dev,workerscripts.kflare.dev,kvnamespaces.kflare.dev,r2buckets.kflare.dev --all -A
    kubectl delete cloudflareaccounts.kflare.dev --all
    ```
 

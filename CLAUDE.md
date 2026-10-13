@@ -175,8 +175,9 @@ Shared infrastructure that all Phase 2 controllers will use.
   - Live Cloudflare specs (`test/e2e/cloudflare_test.go`, skipped without credentials): account validation,
     Tunnel + token Secret, TunnelConfiguration, KVNamespace, R2Bucket, WorkerScript (bound to both). With
     `CF_E2E_ZONE` also Zone adoption (always `retain`), a DNSRecord (including a check that an idle reconcile does not
-    write to Cloudflare) and a WorkerRoute plus exclusion route. Then everything is deleted in one pass and Cloudflare is
-    checked. Everything is named `kflare-e2e-<run>` and cleaned up even on failure
+    write to Cloudflare), a WorkerRoute plus exclusion route, and two WAFCustomRules (a skip rule placed before a block
+    rule by priority; an idle reconcile leaves the ruleset version alone). Then everything is deleted in one pass and
+    Cloudflare is checked. Everything is named `kflare-e2e-<run>` and cleaned up even on failure
   - `KFLARE_E2E_MANAGER=external` uses an already running manager (e.g. `make run`) instead of deploying one
     (first green live run: 2026-10-05, this way, on kind-kflare-dev)
   - Needs repo secrets `CF_API_TOKEN`, `CF_ACCOUNT_ID` and variable `CF_E2E_ZONE` (`kflare.dev`, the project's
@@ -452,8 +453,8 @@ shared machinery once; each rule CRD on top of it is mostly types plus a convers
 | `feat/r2-bucket-controller` | `R2Bucket` (+ WorkerScript `r2BucketRef`) | shared-client | ✅ |
 | `feat/cloudflare-go-v0.119` | none: SDK bump (see [SDK decision](#sdk-decision)) | — | ✅ |
 | `feat/rulesets-foundation` | none: Rulesets client calls and the shared rule sync | zone-controller | ✅ |
-| `feat/waf-custom-rule-controller` | `WAFCustomRule` (was `FirewallRule`) | rulesets-foundation | **Next.** Free: 5 rules, no regex, no Log action, no custom block response |
-| `feat/rate-limit-rule-controller` | `RateLimitRule` (was `RateLimit`) | rulesets-foundation | Free: 1 rule, 10 s period, counts by IP |
+| `feat/waf-custom-rule-controller` | `WAFCustomRule` (was `FirewallRule`) | rulesets-foundation | ✅ Free: 5 rules, no regex, no Log action, no custom block response |
+| `feat/rate-limit-rule-controller` | `RateLimitRule` (was `RateLimit`) | rulesets-foundation | **Next.** Free: 1 rule, 10 s period, counts by IP |
 | `feat/ip-list-controller` | `IPList` | shared-client | Free: 1 list, 10,000 items, IP lists only |
 | `feat/zero-trust-controllers` | `AccessGroup`, `AccessPolicy`, `AccessApplication` | shared-client | Blocked: Zero Trust is not enabled on the account (a free plan exists) |
 | `feat/managed-ruleset-controller` | `ManagedRuleset` (was `WAFPackage`) | rulesets-foundation | Free: only the Cloudflare Free Managed Ruleset |
@@ -564,6 +565,7 @@ Last checked 2026-10-07; the Free-plan limits and Zero Trust again on 2026-10-09
 | Item | Why | What exists | When we come back to it |
 |------|-----|-------------|-------------------------|
 | Zone `spec.plan` | Changing a plan bills the account | Implemented (subscription POST/PUT, `plan_pending`), unit-tested against response shapes read from the live Free zone | Exercise once on a disposable zone (upgrade, check status, downgrade); expect a prorated charge |
+| WAFCustomRule `blockResponse` | Custom block responses need a Pro plan; a Free zone refuses them ("not entitled to use a custom response", dry run 2026-10-09) | Implemented to Cloudflare's documented limits (status 400–499, four content types, 2 KB body), unit-tested | On a Pro zone: create a block rule with a response, request the path, check the status and body |
 
 **Worked around because the clean option is paid:**
 
@@ -748,25 +750,41 @@ creation, idle sync, placement, reordering, drift, deletion), and `WAFCustomRule
 
 #### Branch: `feat/waf-custom-rule-controller`
 **Depends on:** `feat/rulesets-foundation`
-**Status:** 🔲 Not started
+**Status:** ✅ Complete
 
-- [ ] Shared API types for every rule kind, in their own file: spec `zoneRef` (immutable), `expression`, `enabled`
-  (default true), `description`, `priority`; status `cloudflareMetadata` (zone ID, ruleset ID, rule ID, ref, version)
-- [ ] `api/v1alpha1/wafcustomrule_types.go`: the shared fields, plus `action` (`block`, `managed_challenge`,
-  `js_challenge`, `challenge`, `skip`, `log`), skip parameters (the rest of the current ruleset, `phases` or
-  `products`) allowed only with `action: skip` (CEL), and an optional `response` for `block` (a custom body; paid)
-- [ ] Controller: the foundation in the `http_request_firewall_custom` phase; watches Zones. Peers: every rule kind
-  writing to the phase (only `WAFCustomRule` here), across namespaces, whose Zone has the same zone ID and that is not
-  being deleted. Requeues after about 10 s when the sync reports `moved`
-- [ ] Rule kinds join `zoneDependents`, so a Zone waits for its rules
-- [ ] Unit tests for the spec → rule conversion (every action's parameters); envtest for the CEL rules
-- [ ] Live e2e: a `block` rule for `/kflare-e2e-<run>`, checked through the entry point; an idle reconcile leaves the
-  ruleset version alone; deletion removes the rule. It uses 1 of Free's 5 rules
-- [ ] Sample, deploy.md permission row
-- [ ] ARCHITECTURE.md: drift and adoption rows, a rules subsection (ownership by ref; kflare reorders only its own
-  rules; it never replaces an entry point), and the known-limitations update: rules carry an ownership marker on the
-  Cloudflare side
+- [x] Shared API types for every rule kind (`api/v1alpha1/rulesetrule_types.go`): `RulesetRuleSpec`, embedded inline
+  (`zoneRef` immutable, `expression` 1–4096 characters, `enabled` default true, `description` up to 4096 characters,
+  `priority`), and `RulesetRuleStatus` with `cloudflareMetadata` (zone ID, ruleset ID, rule ID, ref, version). Each
+  kind implements `GetRulesetRuleSpec` and `GetRulesetRuleStatus`
+- [x] `api/v1alpha1/wafcustomrule_types.go`: the shared fields plus `action` (`block`, `challenge`, `js_challenge`,
+  `managed_challenge`, `skip`, `log`); `skip` (`remainingRules`, `phases`, `products`, `log` default true), required
+  with `action: skip`, allowed only with it, and required to skip something (CEL); `blockResponse` (`statusCode`
+  400–499, default 403; `contentType` text/html, text/plain, application/json or text/xml; `content` up to 2 KB),
+  allowed only with `block`. Short name `cfwaf`
+- [x] Shared rule controller (`internal/controller/rulesetrule_controller.go`), the reconcile loop of every rule kind:
+  Zone readiness, credentials, peers, `syncRulesetRule`, status, a requeue after 10 s when it moved rules, and deletion
+  by ref (in the zone of the last sync, else the Zone's; skipped when the Zone is gone). A kind supplies only a
+  `rulesetRuleKind` (name, phase, constructors, spec → rule conversion), listed in `rulesetRuleKinds`. Peers are the
+  resources of every kind in the same phase and Cloudflare zone, in any namespace, that are not being deleted
+- [x] `WAFCustomRuleReconciler`: phase `http_request_firewall_custom`. It sorts the skipped phases and products, which
+  Cloudflare keeps in the order sent (verified live), so reordering them in the spec writes nothing; it sets `logging`
+  only on skip rules
+- [x] A Zone waits for its WAFCustomRules before it is deleted
+- [x] Unit and envtest tests against the Rulesets fake, CEL validation cases, and a live e2e spec: a block rule and a
+  lower-priority skip rule, placed before it; an idle reconcile leaves the ruleset version alone; deletion removes both
+- [x] Sample, deploy.md permission row, Helm `edit` role, ARCHITECTURE.md (new "Rules" section)
 
+**WAFCustomRule design notes (dry runs and probes on `kflare.dev`, 2026-10-12):**
+- Free accepts `block`, `challenge`, `js_challenge`, `managed_challenge` and `skip`; `log` is refused ("not entitled")
+- Skip options Free accepts, alone or together: `ruleset: current`; `phases` `http_ratelimit`,
+  `http_request_firewall_managed` and `http_request_sbfm`; `products` `zoneLockdown`, `uaBlock`, `bic`, `hot`,
+  `securityLevel`, `rateLimit` and `waf`; `logging: {enabled: false}`
+- Rejections (all 400): a skip without action parameters (20115); a phase that cannot be skipped (20120); an unknown
+  product (20119); `logging` on any other action (20018); an expression that does not parse or is over 4096 characters
+  (20127); a description over 4096 characters (20208)
+- `blockResponse` follows Cloudflare's documentation (Pro plans and up); it is not verified live, see Deferred
+- deploy.md documents Zone · Zone WAF · Edit. The dev token writes the phase through its account-level permissions, so
+  a token holding only that permission has not been tested (ask before creating one)
 
 #### Branch: `feat/rate-limit-rule-controller`
 **Depends on:** `feat/rulesets-foundation`
@@ -879,7 +897,7 @@ Each is the foundation plus typed action parameters. Together they replace Page 
   and Registrar Domains Admin. Set the secrets `CF_API_TOKEN` and `CF_ACCOUNT_ID`, and the variable
   `CF_E2E_ZONE=kflare.dev`
 - [ ] Tag `v0.1.0`: `Chart.yaml` is already at 0.1.0 and no tag exists. The release workflow publishes the image and
-  chart. Fix first: `docs/deploy.md` says "the six kflare CRDs", but there are nine
+  chart. (`docs/deploy.md`'s stale "the six kflare CRDs" was fixed with WAFCustomRule)
 - [ ] `kflare.dev` expires on 2027-10-04 with auto-renew off (registered 2026-10-04). The e2e zone disappears if it
   lapses: decide on renewal before September 2027
 - [ ] Open question: a Terraform `infra/` root for `kflare.dev` (zone, renewal, CI token, GitHub secrets)
@@ -996,8 +1014,8 @@ export CF_E2E_ZONE=kflare.dev               # zone for the DNS e2e specs; adopte
 
 ## Current Status
 
-> **Phases 1 and 2 complete. Phase 3 in progress: `KVNamespace` and `R2Bucket` done.**
-> cloudflare-go is at v0.119 and the Rulesets foundation is in place. Next: `WAFCustomRule` (see Phase 3). Items
-> needing a paid plan, add-on or account setup are tracked under "Deferred: paid plan, add-on or account setup" in
-> Phase 3.
+> **Phases 1 and 2 complete. Phase 3 in progress: `KVNamespace`, `R2Bucket` and `WAFCustomRule` done.**
+> cloudflare-go is at v0.119; rule kinds share the Rulesets foundation and controller. Next: `RateLimitRule` (see
+> Phase 3). Items needing a paid plan, add-on or account setup are tracked under "Deferred: paid plan, add-on or
+> account setup" in Phase 3.
 > Last updated: October 2026
