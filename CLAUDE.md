@@ -175,9 +175,10 @@ Shared infrastructure that all Phase 2 controllers will use.
   - Live Cloudflare specs (`test/e2e/cloudflare_test.go`, skipped without credentials): account validation,
     Tunnel + token Secret, TunnelConfiguration, KVNamespace, R2Bucket, WorkerScript (bound to both). With
     `CF_E2E_ZONE` also Zone adoption (always `retain`), a DNSRecord (including a check that an idle reconcile does not
-    write to Cloudflare), a WorkerRoute plus exclusion route, and two WAFCustomRules (a skip rule placed before a block
-    rule by priority; an idle reconcile leaves the ruleset version alone). Then everything is deleted in one pass and
-    Cloudflare is checked. Everything is named `kflare-e2e-<run>` and cleaned up even on failure
+    write to Cloudflare), a WorkerRoute plus exclusion route, two WAFCustomRules (a skip rule placed before a block
+    rule by priority; an idle reconcile leaves the ruleset version alone) and a RateLimitRule (checked field by field,
+    then updated in place; an idle reconcile leaves it alone). Then everything is deleted in one pass and Cloudflare is
+    checked. Everything is named `kflare-e2e-<run>` and cleaned up even on failure
   - `KFLARE_E2E_MANAGER=external` uses an already running manager (e.g. `make run`) instead of deploying one
     (first green live run: 2026-10-05, this way, on kind-kflare-dev)
   - Needs repo secrets `CF_API_TOKEN`, `CF_ACCOUNT_ID` and variable `CF_E2E_ZONE` (`kflare.dev`, the project's
@@ -454,8 +455,8 @@ shared machinery once; each rule CRD on top of it is mostly types plus a convers
 | `feat/cloudflare-go-v0.119` | none: SDK bump (see [SDK decision](#sdk-decision)) | — | ✅ |
 | `feat/rulesets-foundation` | none: Rulesets client calls and the shared rule sync | zone-controller | ✅ |
 | `feat/waf-custom-rule-controller` | `WAFCustomRule` (was `FirewallRule`) | rulesets-foundation | ✅ Free: 5 rules, no regex, no Log action, no custom block response |
-| `feat/rate-limit-rule-controller` | `RateLimitRule` (was `RateLimit`) | rulesets-foundation | **Next.** Free: 1 rule, 10 s period, counts by IP |
-| `feat/ip-list-controller` | `IPList` | shared-client | Free: 1 list, 10,000 items, IP lists only |
+| `feat/rate-limit-rule-controller` | `RateLimitRule` (was `RateLimit`) | rulesets-foundation | ✅ Free: 1 rule, 10 s period and timeout, counts by IP, block only |
+| `feat/ip-list-controller` | `IPList` | shared-client | **Next.** Free: 1 list, 10,000 items, IP lists only |
 | `feat/zero-trust-controllers` | `AccessGroup`, `AccessPolicy`, `AccessApplication` | shared-client | Blocked: Zero Trust is not enabled on the account (a free plan exists) |
 | `feat/managed-ruleset-controller` | `ManagedRuleset` (was `WAFPackage`) | rulesets-foundation | Free: only the Cloudflare Free Managed Ruleset |
 | `feat/managed-transform-controller` | `ManagedTransform` | zone-controller | Free: all six transforms |
@@ -565,7 +566,7 @@ Last checked 2026-10-07; the Free-plan limits and Zero Trust again on 2026-10-09
 | Item | Why | What exists | When we come back to it |
 |------|-----|-------------|-------------------------|
 | Zone `spec.plan` | Changing a plan bills the account | Implemented (subscription POST/PUT, `plan_pending`), unit-tested against response shapes read from the live Free zone | Exercise once on a disposable zone (upgrade, check status, downgrade); expect a prorated charge |
-| WAFCustomRule `blockResponse` | Custom block responses need a Pro plan; a Free zone refuses them ("not entitled to use a custom response", dry run 2026-10-09) | Implemented to Cloudflare's documented limits (status 400–499, four content types, 2 KB body), unit-tested | On a Pro zone: create a block rule with a response, request the path, check the status and body |
+| WAFCustomRule `blockResponse` | Custom block responses need a Pro plan; a Free zone refuses them ("not entitled to use a custom response", dry run 2026-10-09) | Implemented to Cloudflare's documented limits (status 400–499, four content types, 2 KB body), unit-tested. A dry run on 2026-10-13 confirmed the limits: Cloudflare validates a response before it checks the plan (codes 20048, 20052). The same response on a `RateLimitRule`, which Free allows, is verified live | On a Pro zone: create a block rule with a response, request the path, check the status and body |
 
 **Worked around because the clean option is paid:**
 
@@ -585,15 +586,16 @@ checked 2026-10-09; ✔ marks what a dry run on `kflare.dev` confirmed the same 
 | Item | Free | Pro | Business |
 |------|------|-----|----------|
 | WAF custom rules | 5 rules ✔, no regex ✔, no Log action ✔, no custom block response ✔, 1 zone-level custom ruleset | 20 rules | 100 rules, regex |
-| Rate limiting rules | 1 rule ✔, period 10 s only ✔, counts by IP, no `managed_challenge` ✔, no throttling (`mitigation_timeout: 0`) ✔ | 2 rules, periods up to 1 min, mitigation up to 1 h | 5 rules, periods up to 10 min, mitigation up to 1 day |
+| Rate limiting rules | 1 rule ✔, period and mitigation timeout 10 s only ✔, counts by IP ✔, block only ✔, no counting expression ✔, no throttling (`mitigation_timeout: 0`) ✔, custom block response ✔ | 2 rules, periods up to 1 min, mitigation up to 1 h | 5 rules, periods up to 10 min, mitigation up to 1 day |
 | WAF managed rulesets | Cloudflare Free Managed Ruleset only ✔ | + Cloudflare Managed Ruleset, OWASP Core Ruleset, Exposed Credentials Check | same as Pro |
 | Custom lists | 1 list, 10,000 items, IP lists only | 10 lists, 10,000 items in total | same as Pro |
 | Transform, redirect, cache, configuration and origin rules | 10 rules each; no regex in transform or redirect rules | 25 each | 50 each; regex in transform and redirect rules |
 | Origin rule overrides | destination port only (Host header, SNI and DNS record need Enterprise) | same | same |
 
 Rate limiting also requires `cf.colo.id` among the characteristics (code 20155) and a mitigation timeout of 0, equal
-to the period or longer (code 20156). The docs limit Free expressions to path and verified-bot fields, but a dry run
-accepted `http.host`; `http.user_agent` was refused.
+to the period or longer (code 20156). The docs limit Free expressions to path and verified-bot fields, but dry runs
+accepted `http.host` and `http.request.method`; `http.user_agent`, `ip.src`, `http.request.uri.query` and the `matches`
+operator were refused.
 
 Controllers must not hard-code these limits: report Cloudflare's own rejection (`TerminalError`) instead, so higher plans
 work unchanged.
@@ -788,16 +790,41 @@ creation, idle sync, placement, reordering, drift, deletion), and `WAFCustomRule
 
 #### Branch: `feat/rate-limit-rule-controller`
 **Depends on:** `feat/rulesets-foundation`
-**Status:** 🔲 Not started
+**Status:** ✅ Complete
 
-- [ ] `api/v1alpha1/ratelimitrule_types.go`: `spec.zoneRef` (immutable), `expression`, `action` (default `block`;
-  others need a paid plan), `characteristics` (default `[ip.src]`; kflare always adds `cf.colo.id`, which Cloudflare
-  requires), `period` (seconds, default 10), `requestsPerPeriod`, optional `mitigationTimeout` (kflare sends the
-  period when unset; CEL: 0 or at least the period), optional `countingExpression` and `requestsToOrigin`, `enabled`,
-  `description`, `priority`
-- [ ] Controller: the foundation in the `http_ratelimit` phase
-- [ ] Live e2e: one rule for `/kflare-e2e-<run>`. Free allows exactly one, so the suite must not run twice at once,
-  and `kflare.dev` must hold no other rate limiting rule
+- [x] `api/v1alpha1/ratelimitrule_types.go`: the shared fields plus `action` (default `block`; `challenge`,
+  `js_challenge`, `managed_challenge`, `log`), `characteristics` (a set, default `[ip.src]`; kflare adds `cf.colo.id`),
+  `period` (seconds, default 10), `requestsPerPeriod` (1 to 1,000,000), `mitigationTimeout` (unset: the period; CEL: 0
+  or at least the period), `countingExpression` (up to 4096 characters), `requestsToOrigin`, and `blockResponse`
+  (status 400–499, default 429; the four content types; body up to 30,720 characters), allowed only with `block`
+  (CEL). Short name `cfratelimit`. `blockResponse` was not in the plan: it was added because Free accepts it here
+- [x] `RateLimitRuleReconciler`: the shared rule controller in the `http_ratelimit` phase. Its conversion puts
+  `cf.colo.id` first and sorts the other characteristics, and always sends a mitigation timeout
+- [x] A Zone waits for its RateLimitRules before it is deleted
+- [x] Unit and envtest tests against the Rulesets fake (the written rule, idle syncs with every option set, in-place
+  updates, rules kept apart from the zone's WAF custom rules, deletion, defaults, CEL validation), a conversion table,
+  and a live e2e spec: one rule for `/kflare-e2e-<run>`, checked field by field (custom JSON response included),
+  updated in place, then left alone by an idle reconcile. Free allows exactly one rate limiting rule, so the suite
+  must not run twice at once, and `kflare.dev` must hold no other
+- [x] Sample, deploy.md (permission row, kinds table, uninstall), Helm `edit` role, ARCHITECTURE.md
+
+**RateLimitRule design notes (dry runs and a stored probe on `kflare.dev`, 2026-10-13):**
+- Free accepts only `block`; the four other actions are refused as "not entitled". `skip` and `execute` are not rate
+  limiting actions at all (20133), and a rule without `ratelimit` is refused in this phase (20132)
+- Cloudflare reads a missing `mitigation_timeout` as 0, which throttles: on Free, "not entitled to use throttle
+  behaviour". So kflare always sends one; cloudflare-go leaves out an explicit 0, which therefore still means 0
+- Validation codes: characteristics without `cf.colo.id`, with only `cf.colo.id`, with a duplicate or with an unknown
+  field (20155); a mitigation timeout that is not 0 and below the period (20156); a period outside the API's list,
+  which is 10, 15, 20, 30, 40, 45, 60, 90, 120, 180, 240, 300, 480, 600, 900, 1200, 1800, 2400, 3600 and 65535
+  seconds (20157; Cloudflare's docs list fewer); requests per period outside 1 to 1,000,000 (20158). kflare's CRD
+  checks the requests range and the timeout rule, and leaves the period to Cloudflare
+- Free accepts a custom block response here, unlike in WAF custom rules: status 400–499 (20048), content type one of
+  four (20050), body required (20051) and at most 30,720 bytes (20052; WAF custom rules allow 2,048). It also accepts
+  `requests_to_origin` and an empty counting expression; a non-empty one needs a higher plan
+- Stored as sent: characteristics keep the order sent; `requests_to_origin: false` and an empty counting expression
+  come back absent, as cloudflare-go sends them
+- deploy.md documents Zone · Zone WAF · Edit, with the same caveat as `WAFCustomRule`: a token holding only that
+  permission has not been tested
 
 
 #### Branch: `feat/ip-list-controller`
@@ -895,7 +922,8 @@ Each is the foundation plus typed action parameters. Together they replace Page 
 - [ ] Run the live e2e suite in GitHub Actions. The repo has no Actions secrets or variables yet (2026-10-09). Use a
   dedicated CI token holding only what the suite needs, not the dev token, which also holds Account API Tokens Write
   and Registrar Domains Admin. Set the secrets `CF_API_TOKEN` and `CF_ACCOUNT_ID`, and the variable
-  `CF_E2E_ZONE=kflare.dev`
+  `CF_E2E_ZONE=kflare.dev`. A Free zone holds one rate limiting rule, so runs must not overlap: give the workflow a
+  `concurrency` group, and avoid local runs while it runs
 - [ ] Tag `v0.1.0`: `Chart.yaml` is already at 0.1.0 and no tag exists. The release workflow publishes the image and
   chart. (`docs/deploy.md`'s stale "the six kflare CRDs" was fixed with WAFCustomRule)
 - [ ] `kflare.dev` expires on 2027-10-04 with auto-renew off (registered 2026-10-04). The e2e zone disappears if it
@@ -1014,8 +1042,8 @@ export CF_E2E_ZONE=kflare.dev               # zone for the DNS e2e specs; adopte
 
 ## Current Status
 
-> **Phases 1 and 2 complete. Phase 3 in progress: `KVNamespace`, `R2Bucket` and `WAFCustomRule` done.**
-> cloudflare-go is at v0.119; rule kinds share the Rulesets foundation and controller. Next: `RateLimitRule` (see
+> **Phases 1 and 2 complete. Phase 3 in progress: `KVNamespace`, `R2Bucket`, `WAFCustomRule` and `RateLimitRule`
+> done.** cloudflare-go is at v0.119; rule kinds share the Rulesets foundation and controller. Next: `IPList` (see
 > Phase 3). Items needing a paid plan, add-on or account setup are tracked under "Deferred: paid plan, add-on or
 > account setup" in Phase 3.
 > Last updated: October 2026

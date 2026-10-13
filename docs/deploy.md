@@ -37,7 +37,7 @@ Create an API token in the Cloudflare dashboard (**My Profile → API Tokens**, 
 | `WorkerRoute` | Zone · Workers Routes · Edit |
 | `KVNamespace` | Account · Workers KV Storage · Edit |
 | `R2Bucket` | Account · Workers R2 Storage · Edit |
-| `WAFCustomRule` | Zone · Zone WAF · Edit |
+| `WAFCustomRule`, `RateLimitRule` | Zone · Zone WAF · Edit |
 
 Scope zone permissions to the zones kflare should manage. Note the account ID, shown on the account's
 overview page.
@@ -128,6 +128,7 @@ Every other kind references the account (or a resource that does). Examples are 
 | `KVNamespace` | Namespaced | `accountRef`; WorkerScripts bind it with `kvNamespaceRef` | [KV namespace](../config/samples/cloudflare_v1alpha1_kvnamespace.yaml) |
 | `R2Bucket` | Namespaced | `accountRef`; WorkerScripts bind it with `r2BucketRef` | [R2 bucket](../config/samples/cloudflare_v1alpha1_r2bucket.yaml) |
 | `WAFCustomRule` | Namespaced | `zoneRef` (same namespace) | [block and skip rules](../config/samples/cloudflare_v1alpha1_wafcustomrule.yaml) |
+| `RateLimitRule` | Namespaced | `zoneRef` (same namespace) | [API rate limit](../config/samples/cloudflare_v1alpha1_ratelimitrule.yaml) |
 
 Things to know before pointing kflare at existing infrastructure:
 
@@ -144,6 +145,10 @@ Things to know before pointing kflare at existing infrastructure:
   derived from the resource's namespace and name. kflare never adopts or changes rules it did not create,
   and keeps its own rules in `spec.priority` order (lower first) while other rules keep their place. Free
   zones allow 5 custom rules, without regular expressions.
+- **Rate limiting rules.** Each `RateLimitRule` manages one rate limiting rule in its zone, marked and ordered
+  like WAF custom rules. Free zones allow one, which counts per IP address over 10 seconds and can only block.
+  Cloudflare also counts per data center, and requires rules to say so: kflare adds `cf.colo.id` to
+  `spec.characteristics` itself.
 - **Immutable fields.** Names and references (`spec.name`, `accountRef`, `zoneRef`, DNS `type`, ...) cannot be
   changed. Create a new resource instead.
 
@@ -224,12 +229,12 @@ Order matters, because kflare's finalizers need the controller running to clean 
 
 1. **Delete your kflare resources while the controller is still running.** Each one deletes its Cloudflare
    object, or keeps it if annotated `retain`. The order does not matter: Zones wait for their records,
-   routes and WAF custom rules, Tunnels for their configurations, KV namespaces and R2 buckets for the Workers bound to them,
+   routes and rules, Tunnels for their configurations, KV namespaces and R2 buckets for the Workers bound to them,
    accounts until nothing uses them, and token Secrets until no account uses them. An R2 bucket that still
    holds objects is not deleted: empty it, or annotate the R2Bucket `retain`.
 
    ```sh
-   kubectl delete zones.kflare.dev,dnsrecords.kflare.dev,workerroutes.kflare.dev,wafcustomrules.kflare.dev,tunnels.kflare.dev,tunnelconfigurations.kflare.dev,workerscripts.kflare.dev,kvnamespaces.kflare.dev,r2buckets.kflare.dev --all -A
+   kubectl delete zones.kflare.dev,dnsrecords.kflare.dev,workerroutes.kflare.dev,wafcustomrules.kflare.dev,ratelimitrules.kflare.dev,tunnels.kflare.dev,tunnelconfigurations.kflare.dev,workerscripts.kflare.dev,kvnamespaces.kflare.dev,r2buckets.kflare.dev --all -A
    kubectl delete cloudflareaccounts.kflare.dev --all
    ```
 

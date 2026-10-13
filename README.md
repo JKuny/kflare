@@ -34,7 +34,9 @@ Early development. Phase 1 (foundation) and Phase 2 (core resources) are complet
 
 - `WAFCustomRule` — manages one WAF custom rule in a `Zone` (block, challenge, skip or log), kept in `spec.priority` order among kflare's rules; rules created outside kflare are left alone (see [the sample](config/samples/cloudflare_v1alpha1_wafcustomrule.yaml))
 
-**Planned next:** more of Phase 3 — rate limiting rules on the Rulesets API, IP lists and Zero Trust, then managed rulesets, managed transforms and the rules that replace Page Rules (transform, redirect, cache, configuration and origin rules); load balancers last (see [CLAUDE.md](./CLAUDE.md)).
+- `RateLimitRule` — manages one rate limiting rule in a `Zone`: counts the requests its expression matches per client IP address (or other characteristics on higher plans) and blocks or challenges a client that goes over the limit, optionally with a custom response (see [the sample](config/samples/cloudflare_v1alpha1_ratelimitrule.yaml))
+
+**Planned next:** more of Phase 3 — IP lists and Zero Trust, then managed rulesets, managed transforms and the rules that replace Page Rules (transform, redirect, cache, configuration and origin rules); load balancers last (see [CLAUDE.md](./CLAUDE.md)).
 
 ## Install
 
@@ -62,7 +64,7 @@ For working on kflare itself:
   - `WorkerRoute` also needs the zone-level **Workers Routes: Edit** permission
   - `KVNamespace` also needs the account-level **Workers KV Storage: Edit** permission
   - `R2Bucket` also needs the account-level **Workers R2 Storage: Edit** permission
-  - `WAFCustomRule` also needs the zone-level **Zone WAF: Edit** permission
+  - `WAFCustomRule` and `RateLimitRule` also need the zone-level **Zone WAF: Edit** permission
   - Setting `Zone` `spec.plan` also needs **Billing: Edit**, and changes your bill
 
 ## Local Development
