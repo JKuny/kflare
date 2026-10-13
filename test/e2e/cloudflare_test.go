@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	cf "github.com/cloudflare/cloudflare-go"
@@ -56,6 +57,7 @@ const (
 // by the specs, or by the cleanup below if a spec fails part-way. The rule
 // specs need room in CF_E2E_ZONE: a Free zone allows one rate limiting rule,
 // so the zone must hold no other, and two runs cannot share the zone at once.
+// Likewise a Free account holds one IP list, so it must hold no other.
 var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 	var (
 		ctx       = context.Background()
@@ -67,14 +69,16 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 
 		accountKey, tunnelKey, tunnelConfigKey, workerKey, zoneKey, recordKey client.ObjectKey
 		routeKey, exclusionKey, kvKey, bucketKey, wafKey, wafSkipKey          client.ObjectKey
-		rateLimitKey                                                          client.ObjectKey
+		rateLimitKey, listKey, listRuleKey                                    client.ObjectKey
 
-		tunnelID, zoneID, recordID, routeID, exclusionID, kvNamespaceID string
+		tunnelID, zoneID, recordID, routeID, exclusionID, kvNamespaceID, listID string
 	)
 
 	// resourceName is the name of every Cloudflare object this run creates.
 	resourceName := func() string { return "kflare-e2e-" + run }
 	recordName := func() string { return resourceName() + "." + zoneName }
+	// listName is the name of the run's IP list: list names allow no hyphens.
+	listName := func() string { return "kflare_e2e_" + run }
 
 	// expectReady waits until obj, re-read through key, reports Ready=True.
 	expectReady := func(key client.ObjectKey, obj client.Object, conditions func() []metav1.Condition) {
@@ -129,6 +133,8 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		wafKey = client.ObjectKey{Namespace: e2eNamespace, Name: "waf-block"}
 		wafSkipKey = client.ObjectKey{Namespace: e2eNamespace, Name: "waf-skip"}
 		rateLimitKey = client.ObjectKey{Namespace: e2eNamespace, Name: "rate-limit"}
+		listKey = client.ObjectKey{Namespace: e2eNamespace, Name: "ip-list"}
+		listRuleKey = client.ObjectKey{Namespace: e2eNamespace, Name: "waf-list"}
 
 		DeferCleanup(func() {
 			By("removing anything this run left behind in Cloudflare")
@@ -143,10 +149,12 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 				GinkgoWriter.Printf("cleanup: deleting R2 bucket %s: %v\n", resourceName(), err)
 			}
 			if zoneID != "" {
-				cleanupRules(ctx, cfAPI, zoneID, customRulesPhase,
-					ruleRef("WAFCustomRule", wafKey), ruleRef("WAFCustomRule", wafSkipKey))
+				cleanupRules(ctx, cfAPI, zoneID, customRulesPhase, ruleRef("WAFCustomRule", wafKey),
+					ruleRef("WAFCustomRule", wafSkipKey), ruleRef("WAFCustomRule", listRuleKey))
 				cleanupRules(ctx, cfAPI, zoneID, rateLimitPhase, ruleRef("RateLimitRule", rateLimitKey))
 			}
+			// After the rules: Cloudflare does not delete a list a rule uses.
+			cleanupList(ctx, cfAPI, accountRC, listName())
 		})
 
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: e2eNamespace}}
@@ -479,11 +487,102 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		expectIdle(ctx, k8s, cfAPI, zoneID, rateLimitPhase, rule)
 	})
 
+	It("manages an IP list, and writes a rule that uses it once the list exists", func() {
+		var rule *cloudflarev1alpha1.WAFCustomRule
+		if zoneName != "" {
+			By("creating a WAF custom rule that uses the list, which Cloudflare refuses while the list does not exist")
+			rule = &cloudflarev1alpha1.WAFCustomRule{
+				ObjectMeta: objectMeta(listRuleKey),
+				Spec: cloudflarev1alpha1.WAFCustomRuleSpec{
+					RulesetRuleSpec: cloudflarev1alpha1.RulesetRuleSpec{
+						ZoneRef: corev1.LocalObjectReference{Name: zoneKey.Name},
+						Expression: `ip.src in $` + listName() +
+							` and starts_with(http.request.uri.path, "/` + resourceName() + `/office")`,
+						Description: "kflare e2e " + run,
+					},
+					Action: "block",
+				},
+			}
+			Expect(k8s.Create(ctx, rule)).To(Succeed())
+			Eventually(func(g Gomega) {
+				g.Expect(k8s.Get(ctx, listRuleKey, rule)).To(Succeed())
+				ready := meta.FindStatusCondition(rule.Status.Conditions, cloudflarev1alpha1.ConditionReady)
+				g.Expect(ready).NotTo(BeNil(), "no Ready condition yet")
+				g.Expect(ready.Reason).To(Equal("TerminalError"))
+				g.Expect(ready.Message).To(ContainSubstring("is unknown"))
+			}, e2eTimeout, e2ePoll).Should(Succeed())
+		}
+
+		list := &cloudflarev1alpha1.IPList{
+			ObjectMeta: objectMeta(listKey),
+			Spec: cloudflarev1alpha1.IPListSpec{
+				AccountRef:  corev1.LocalObjectReference{Name: accountKey.Name},
+				Name:        listName(),
+				Description: "kflare e2e " + run,
+				Items: []cloudflarev1alpha1.IPListItem{
+					{IP: "192.0.2.1", Comment: "documentation address"},
+					{IP: "198.51.100.0/24"},
+					{IP: "2001:DB8::/48"},
+				},
+			},
+		}
+		Expect(k8s.Create(ctx, list)).To(Succeed())
+		expectReady(listKey, list, func() []metav1.Condition { return list.Status.Conditions })
+		listID = list.Status.CloudflareMetadata.ListID
+		Expect(list.Labels).To(HaveKeyWithValue(cloudflarev1alpha1.IPListIDLabel, listID))
+		Expect(list.Status.CloudflareMetadata.NumItems).To(BeEquivalentTo(3))
+		cfList, err := cfAPI.GetList(ctx, accountRC, listID)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfList.Name).To(Equal(listName()))
+		Expect(cfList.Kind).To(Equal(cf.ListTypeIP))
+		Expect(cfList.Description).To(Equal(list.Spec.Description))
+		Expect(listItems(ctx, cfAPI, accountRC, listID)).To(
+			ConsistOf("192.0.2.1 documentation address", "198.51.100.0/24", "2001:db8::/48"))
+
+		if rule != nil {
+			By("writing the rule once the list exists")
+			expectReady(listRuleKey, rule, func() []metav1.Condition { return rule.Status.Conditions })
+			cfRule, ok := ruleByRef(phaseRules(ctx, cfAPI, zoneID, customRulesPhase), ruleRef("WAFCustomRule", listRuleKey))
+			Expect(ok).To(BeTrue(), "the rule that uses the list was not written")
+			Expect(cfRule.Expression).To(Equal(rule.Spec.Expression))
+		}
+
+		By("changing the items, which Cloudflare replaces in the same list")
+		patch := client.MergeFrom(list.DeepCopy())
+		list.Spec.Items = []cloudflarev1alpha1.IPListItem{
+			{IP: "192.0.2.1", Comment: "front door"},
+			{IP: "203.0.113.7/32"},
+		}
+		Expect(k8s.Patch(ctx, list, patch)).To(Succeed())
+		Eventually(func(g Gomega) {
+			g.Expect(k8s.Get(ctx, listKey, list)).To(Succeed())
+			ready := meta.FindStatusCondition(list.Status.Conditions, cloudflarev1alpha1.ConditionReady)
+			g.Expect(ready).NotTo(BeNil(), "no Ready condition yet")
+			g.Expect(ready.ObservedGeneration).To(Equal(list.Generation))
+			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue), "%s: %s", ready.Reason, ready.Message)
+		}, e2eTimeout, e2ePoll).Should(Succeed())
+		Expect(list.Status.CloudflareMetadata.ListID).To(Equal(listID))
+		Expect(listItems(ctx, cfAPI, accountRC, listID)).To(ConsistOf("192.0.2.1 front door", "203.0.113.7"))
+
+		By("re-triggering the reconcile and checking the list is not written to again")
+		modified := func() *time.Time {
+			current, err := cfAPI.GetList(ctx, accountRC, listID)
+			Expect(err).NotTo(HaveOccurred())
+			return current.ModifiedOn
+		}
+		before := modified()
+		patch = client.MergeFrom(list.DeepCopy())
+		list.Annotations = map[string]string{"e2e.kflare.dev/touched": time.Now().Format(time.RFC3339)}
+		Expect(k8s.Patch(ctx, list, patch)).To(Succeed())
+		Consistently(modified, 15*time.Second, 3*time.Second).Should(Equal(before))
+	})
+
 	It("removes everything from Cloudflare when everything is deleted at once", func() {
 
 		// One delete for everything, in no particular order, like `kubectl delete
 		// -f` on a directory: parents must wait for the children that need them
-		// (Zone, Tunnel, KVNamespace, R2Bucket, CloudflareAccount and its token Secret).
+		// (Zone, Tunnel, KVNamespace, R2Bucket, CloudflareAccount and its token Secret),
+		// and Cloudflare deletes the IP list only once the rule using it is gone.
 		By("deleting every resource at once")
 		everything := []client.Object{
 			&cloudflarev1alpha1.WorkerRoute{ObjectMeta: objectMeta(routeKey)},
@@ -491,6 +590,8 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 			&cloudflarev1alpha1.WAFCustomRule{ObjectMeta: objectMeta(wafKey)},
 			&cloudflarev1alpha1.WAFCustomRule{ObjectMeta: objectMeta(wafSkipKey)},
 			&cloudflarev1alpha1.RateLimitRule{ObjectMeta: objectMeta(rateLimitKey)},
+			&cloudflarev1alpha1.WAFCustomRule{ObjectMeta: objectMeta(listRuleKey)},
+			&cloudflarev1alpha1.IPList{ObjectMeta: objectMeta(listKey)},
 			&cloudflarev1alpha1.DNSRecord{ObjectMeta: objectMeta(recordKey)},
 			&cloudflarev1alpha1.TunnelConfiguration{ObjectMeta: objectMeta(tunnelConfigKey)},
 			&cloudflarev1alpha1.WorkerScript{ObjectMeta: objectMeta(workerKey)},
@@ -519,6 +620,10 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		Expect(kvNamespaces(ctx, cfAPI, accountRC)).NotTo(HaveKey(kvNamespaceID))
 		_, err = cfAPI.GetR2Bucket(ctx, accountRC, resourceName())
 		Expect(cfpkg.IsNotFound(err)).To(BeTrue(), "bucket was not deleted: %v", err)
+		if listID != "" {
+			_, err = cfAPI.GetList(ctx, accountRC, listID)
+			Expect(cfpkg.IsNotFound(err)).To(BeTrue(), "IP list was not deleted: %v", err)
+		}
 		if zoneName != "" {
 			_, err := cfAPI.GetDNSRecord(ctx, cf.ZoneIdentifier(zoneID), recordID)
 			Expect(cfpkg.IsNotFound(err)).To(BeTrue(), "record was not deleted: %v", err)
@@ -527,8 +632,8 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 				Expect(cfpkg.IsNotFound(err)).To(BeTrue(), "route %s was not deleted: %v", id, err)
 			}
 			for _, rule := range phaseRules(ctx, cfAPI, zoneID, customRulesPhase) {
-				Expect(rule.Ref).NotTo(BeElementOf(ruleRef("WAFCustomRule", wafKey), ruleRef("WAFCustomRule", wafSkipKey)),
-					"rule %s was not deleted", rule.ID)
+				Expect(rule.Ref).NotTo(BeElementOf(ruleRef("WAFCustomRule", wafKey), ruleRef("WAFCustomRule", wafSkipKey),
+					ruleRef("WAFCustomRule", listRuleKey)), "rule %s was not deleted", rule.ID)
 			}
 			_, ok := ruleByRef(phaseRules(ctx, cfAPI, zoneID, rateLimitPhase), ruleRef("RateLimitRule", rateLimitKey))
 			Expect(ok).To(BeFalse(), "the rate limiting rule was not deleted")
@@ -664,6 +769,37 @@ func expectIdle(ctx context.Context, k8s client.Client, api *cf.API, zoneID, pha
 	Consistently(func() string {
 		return phaseVersion(ctx, api, zoneID, phase)
 	}, 15*time.Second, 3*time.Second).Should(Equal(version))
+}
+
+// listItems returns the items of the account's list with listID, as "ip
+// comment" strings.
+func listItems(ctx context.Context, api *cf.API, rc *cf.ResourceContainer, listID string) []string {
+	items, err := api.ListListItems(ctx, rc, cf.ListListItemsParams{ID: listID, PerPage: 500})
+	Expect(err).NotTo(HaveOccurred())
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		Expect(item.IP).NotTo(BeNil(), "item %s is not an address", item.ID)
+		out = append(out, strings.TrimSpace(*item.IP+" "+item.Comment))
+	}
+	return out
+}
+
+// cleanupList deletes the account's list named name, if there is one. It
+// only reports problems: it runs after the specs, whether or not they passed.
+func cleanupList(ctx context.Context, api *cf.API, rc *cf.ResourceContainer, name string) {
+	lists, err := api.ListLists(ctx, rc, cf.ListListsParams{})
+	if err != nil {
+		GinkgoWriter.Printf("cleanup: listing IP lists: %v\n", err)
+		return
+	}
+	for _, list := range lists {
+		if list.Name != name {
+			continue
+		}
+		if _, err := api.DeleteList(ctx, rc, list.ID); err != nil {
+			GinkgoWriter.Printf("cleanup: deleting IP list %s: %v\n", list.ID, err)
+		}
+	}
 }
 
 // cleanupRules deletes the rules with refs from the zone's entry point in
