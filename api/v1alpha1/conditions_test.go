@@ -28,6 +28,7 @@ func TestConditionAccessors(t *testing.T) {
 		"R2Bucket":            &R2Bucket{},
 		"WAFCustomRule":       &WAFCustomRule{},
 		"RateLimitRule":       &RateLimitRule{},
+		"IPList":              &IPList{},
 	}
 	want := []metav1.Condition{{Type: ConditionReady, Status: metav1.ConditionTrue, Reason: "Synced"}}
 	for kind, obj := range objects {

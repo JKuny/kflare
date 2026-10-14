@@ -133,7 +133,7 @@ func (r *R2BucketReconciler) syncBucket(
 		}
 		if owner != "" {
 			return notReadyRetryAfter(ctx, r.Client, bucket, &conditionError{
-				Reason:  "NameConflict",
+				Reason:  reasonNameConflict,
 				Message: fmt.Sprintf("R2 bucket %q is already managed by R2Bucket %s", name, owner),
 			})
 		}

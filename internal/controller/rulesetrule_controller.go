@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	cf "github.com/cloudflare/cloudflare-go"
@@ -269,12 +270,47 @@ func (r *rulesetRuleReconciler) deleteCloudflareRule(ctx context.Context, obj ru
 
 // setup registers the kind's controller, with rec as its reconciler. It
 // watches Zones, so a rule waiting for its Zone is reconciled as soon as the
-// Zone is ready.
+// Zone is ready, and IPLists, so a rule that uses a list is written once the
+// list exists.
 func (r *rulesetRuleReconciler) setup(mgr ctrl.Manager, rec reconcile.Reconciler) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(r.kind.newObject()).
 		Watches(&cloudflarev1alpha1.Zone{}, handler.EnqueueRequestsFromMapFunc(r.rulesForZone)).
+		Watches(&cloudflarev1alpha1.IPList{}, handler.EnqueueRequestsFromMapFunc(r.rulesUsingList)).
 		Complete(rec)
+}
+
+// The rule kinds' controllers watch IPLists.
+//+kubebuilder:rbac:groups=kflare.dev,resources=iplists,verbs=get;list;watch
+
+// rulesUsingList maps an IPList event to the kind's resources, in any
+// namespace, whose expression uses the list, once the list exists in
+// Cloudflare. Cloudflare refuses a rule that uses a list the account does not
+// have (code 20127, a terminal error), so a rule applied together with its
+// list may fail first; this writes it once the list is there.
+func (r *rulesetRuleReconciler) rulesUsingList(ctx context.Context, obj client.Object) []reconcile.Request {
+	ipList, ok := obj.(*cloudflarev1alpha1.IPList)
+	if !ok || ipList.Status.CloudflareMetadata.ListID == "" {
+		return nil
+	}
+	list := r.kind.newList()
+	if err := r.List(ctx, list); err != nil {
+		return nil
+	}
+	items, err := meta.ExtractList(list)
+	if err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for _, item := range items {
+		rule, ok := item.(rulesetRuleObject)
+		if ok && slices.Contains(listsInExpression(rule.GetRulesetRuleSpec().Expression), ipList.Spec.Name) {
+			reqs = append(reqs, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: rule.GetName(), Namespace: rule.GetNamespace()},
+			})
+		}
+	}
+	return reqs
 }
 
 // rulesForZone maps a Zone event to the kind's resources in that zone.

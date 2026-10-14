@@ -24,6 +24,7 @@
   resources:
   - cloudflareaccounts
   - dnsrecords
+  - iplists
   - kvnamespaces
   - r2buckets
   - ratelimitrules
@@ -46,6 +47,7 @@
   resources:
   - cloudflareaccounts/finalizers
   - dnsrecords/finalizers
+  - iplists/finalizers
   - kvnamespaces/finalizers
   - r2buckets/finalizers
   - ratelimitrules/finalizers
@@ -62,6 +64,7 @@
   resources:
   - cloudflareaccounts/status
   - dnsrecords/status
+  - iplists/status
   - kvnamespaces/status
   - r2buckets/status
   - ratelimitrules/status

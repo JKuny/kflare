@@ -106,7 +106,7 @@ Planned, not yet present: `generator/` (Phase 3), the Docusaurus site under `doc
   - Sets `Ready` condition and `accountName` in status
   - Tested live against real Cloudflare account ✅
   - Watches its token Secret; deletion protection keeps the account (finalizer, `Ready=False InUse`) while a
-    Zone, Tunnel, WorkerScript, KVNamespace or R2Bucket references it, and the token Secret
+    Zone, Tunnel, WorkerScript, KVNamespace, R2Bucket or IPList references it, and the token Secret
     (`kflare.dev/token-protection`, recorded in `status.protectedTokenSecret`) while an account references it — see
     `cloudflareaccount_protection.go`
 - [x] Makefile targets: `generate`, `manifests`, `build`, `run`, `test` (kubebuilder-generated)
@@ -173,12 +173,14 @@ Shared infrastructure that all Phase 2 controllers will use.
   - Deployment smoke test: builds the image, deploys `config/default` to kind, checks the manager pod is
     ready with no restarts
   - Live Cloudflare specs (`test/e2e/cloudflare_test.go`, skipped without credentials): account validation,
-    Tunnel + token Secret, TunnelConfiguration, KVNamespace, R2Bucket, WorkerScript (bound to both). With
-    `CF_E2E_ZONE` also Zone adoption (always `retain`), a DNSRecord (including a check that an idle reconcile does not
-    write to Cloudflare), a WorkerRoute plus exclusion route, two WAFCustomRules (a skip rule placed before a block
-    rule by priority; an idle reconcile leaves the ruleset version alone) and a RateLimitRule (checked field by field,
-    then updated in place; an idle reconcile leaves it alone). Then everything is deleted in one pass and Cloudflare is
-    checked. Everything is named `kflare-e2e-<run>` and cleaned up even on failure
+    Tunnel + token Secret, TunnelConfiguration, KVNamespace, R2Bucket, WorkerScript (bound to both), and an IPList
+    (items replaced in place; an idle reconcile leaves the list alone). With `CF_E2E_ZONE` also Zone adoption (always
+    `retain`), a DNSRecord (including a check that an idle reconcile does not write to Cloudflare), a WorkerRoute plus
+    exclusion route, two WAFCustomRules (a skip rule placed before a block rule by priority; an idle reconcile leaves
+    the ruleset version alone), a RateLimitRule (checked field by field, then updated in place; an idle reconcile
+    leaves it alone), and a WAFCustomRule that uses the IP list (refused while the list does not exist, written once
+    it does). Then everything is deleted in one pass and Cloudflare is checked. Everything is named
+    `kflare-e2e-<run>` (the list `kflare_e2e_<run>`) and cleaned up even on failure
   - `KFLARE_E2E_MANAGER=external` uses an already running manager (e.g. `make run`) instead of deploying one
     (first green live run: 2026-10-05, this way, on kind-kflare-dev)
   - Needs repo secrets `CF_API_TOKEN`, `CF_ACCOUNT_ID` and variable `CF_E2E_ZONE` (`kflare.dev`, the project's
@@ -456,9 +458,9 @@ shared machinery once; each rule CRD on top of it is mostly types plus a convers
 | `feat/rulesets-foundation` | none: Rulesets client calls and the shared rule sync | zone-controller | ✅ |
 | `feat/waf-custom-rule-controller` | `WAFCustomRule` (was `FirewallRule`) | rulesets-foundation | ✅ Free: 5 rules, no regex, no Log action, no custom block response |
 | `feat/rate-limit-rule-controller` | `RateLimitRule` (was `RateLimit`) | rulesets-foundation | ✅ Free: 1 rule, 10 s period and timeout, counts by IP, block only |
-| `feat/ip-list-controller` | `IPList` | shared-client | **Next.** Free: 1 list, 10,000 items, IP lists only |
+| `feat/ip-list-controller` | `IPList` | shared-client | ✅ Free: 1 IP list, 10,000 items |
 | `feat/zero-trust-controllers` | `AccessGroup`, `AccessPolicy`, `AccessApplication` | shared-client | Blocked: Zero Trust is not enabled on the account (a free plan exists) |
-| `feat/managed-ruleset-controller` | `ManagedRuleset` (was `WAFPackage`) | rulesets-foundation | Free: only the Cloudflare Free Managed Ruleset |
+| `feat/managed-ruleset-controller` | `ManagedRuleset` (was `WAFPackage`) | rulesets-foundation | **Next** (Zero Trust is blocked). Free: only the Cloudflare Free Managed Ruleset |
 | `feat/managed-transform-controller` | `ManagedTransform` | zone-controller | Free: all six transforms |
 | `feat/transform-rule-controller` | `TransformRule` | rulesets-foundation | Free: 10 rules, no regex |
 | `feat/redirect-rule-controller` | `RedirectRule` | rulesets-foundation | Free: 10 rules, no regex |
@@ -495,20 +497,26 @@ permission group names; deploy.md uses the dashboard's labels, so look those up 
 
 | Resource | Permission to document (least privilege) | Dev token today |
 |---|---|---|
-| `WAFCustomRule`, `RateLimitRule`, `ManagedRuleset` | Zone WAF Write | ✅ dry run accepted |
+| `WAFCustomRule`, `RateLimitRule`, `ManagedRuleset` | Zone WAF Write | ✅ dry run accepted; enough on its own for the first two (2026-10-13, see below) |
 | `TransformRule` | Zone Transform Rules Write | ✅ dry run accepted |
 | `RedirectRule` | Dynamic URL Redirects Write | ❌ 403, "request is not authorized" |
 | `CacheRule` | Cache Settings Write | ❌ 403 |
 | `ConfigurationRule` | Config Settings Write | ❌ 403 |
 | `OriginRule` | Origin Write | ❌ 403 |
 | `ManagedTransform` | Managed headers Write | ❌ Read only (not a Rulesets endpoint, so no dry run) |
-| `IPList` | Account Rule Lists Write (account) | ✅ |
+| `IPList` | Account Rule Lists Write (account) | ✅ create, replace and delete verified 2026-10-13; enough on its own |
 | `AccessGroup`, `AccessPolicy`, `AccessApplication` | Access: Organizations, Identity Providers, and Groups Write; Access: Apps and Policies Write (account) | ✅, but Access is not enabled |
 
 - Adding a permission to the dev token needs the user's OK first, as with Workers Routes Write on 2026-10-05
-- Before deploy.md recommends a zone-level permission, check that it is enough on its own. The dev token's
-  account-level permissions already cover these phases, so it cannot show that; a second, narrower token can (ask
-  before creating one)
+- **deploy.md's permissions are enough on their own** (checked 2026-10-13, with the user's OK). An account-owned token
+  holding only Account Settings Read, Cloudflare Tunnel Write, Workers Scripts Write, Workers KV Storage Write,
+  Workers R2 Storage Write and Account Rule Lists Write on the account, and Zone Read, DNS Write, Workers Routes Write
+  and Zone WAF Write on `kflare.dev`, ran the whole live e2e suite (13 of 13, run `714bb3`), with no refusal in the
+  manager's log. It was refused for transform rules, account rulesets and API tokens. So Zone WAF Write alone covers
+  `WAFCustomRule` and `RateLimitRule`, and Zone Read is enough to adopt a zone. The token expired within 3 hours and
+  was deleted after the run
+- The dev token's account-level permissions cover more than deploy.md lists, so it cannot show that a permission is
+  enough. Check a new one with a short-lived token holding only deploy.md's permissions, as above (ask first)
 
 #### SDK decision
 **Status:** Accepted 2026-10-09. Step 1 is done: kflare uses cloudflare-go **v0.119.0**
@@ -572,7 +580,7 @@ Last checked 2026-10-07; the Free-plan limits and Zero Trust again on 2026-10-09
 
 | Item | Paid option | Current workaround | When we come back to it |
 |------|-------------|--------------------|-------------------------|
-| Ownership marker on the Cloudflare side (DNSRecord, and in general) | DNS record tags (Pro plan and up) | `kflare.dev/record-id` / `route-id` / `kv-namespace-id` / `r2-bucket-name` labels in the cluster; ARCHITECTURE.md lists "no ownership marker on the Cloudflare side" as a known limitation | With a Pro zone, tag records kflare creates; or a TXT ownership registry like external-dns (works on Free) |
+| Ownership marker on the Cloudflare side (DNSRecord, and in general) | DNS record tags (Pro plan and up) | `kflare.dev/record-id` / `route-id` / `kv-namespace-id` / `r2-bucket-name` / `ip-list-id` labels in the cluster; ARCHITECTURE.md lists "no ownership marker on the Cloudflare side" as a known limitation | With a Pro zone, tag records kflare creates; or a TXT ownership registry like external-dns (works on Free) |
 
 **Free, but needs account setup first:**
 
@@ -588,7 +596,7 @@ checked 2026-10-09; ✔ marks what a dry run on `kflare.dev` confirmed the same 
 | WAF custom rules | 5 rules ✔, no regex ✔, no Log action ✔, no custom block response ✔, 1 zone-level custom ruleset | 20 rules | 100 rules, regex |
 | Rate limiting rules | 1 rule ✔, period and mitigation timeout 10 s only ✔, counts by IP ✔, block only ✔, no counting expression ✔, no throttling (`mitigation_timeout: 0`) ✔, custom block response ✔ | 2 rules, periods up to 1 min, mitigation up to 1 h | 5 rules, periods up to 10 min, mitigation up to 1 day |
 | WAF managed rulesets | Cloudflare Free Managed Ruleset only ✔ | + Cloudflare Managed Ruleset, OWASP Core Ruleset, Exposed Credentials Check | same as Pro |
-| Custom lists | 1 list, 10,000 items, IP lists only | 10 lists, 10,000 items in total | same as Pro |
+| Custom lists | 1 IP list ✔, 10,000 items in the account ✔; the quota is per kind (a hostname list was accepted alongside) | 10 lists, 10,000 items in total | same as Pro |
 | Transform, redirect, cache, configuration and origin rules | 10 rules each; no regex in transform or redirect rules | 25 each | 50 each; regex in transform and redirect rules |
 | Origin rule overrides | destination port only (Host header, SNI and DNS record need Enterprise) | same | same |
 
@@ -785,8 +793,7 @@ creation, idle sync, placement, reordering, drift, deletion), and `WAFCustomRule
   product (20119); `logging` on any other action (20018); an expression that does not parse or is over 4096 characters
   (20127); a description over 4096 characters (20208)
 - `blockResponse` follows Cloudflare's documentation (Pro plans and up); it is not verified live, see Deferred
-- deploy.md documents Zone · Zone WAF · Edit. The dev token writes the phase through its account-level permissions, so
-  a token holding only that permission has not been tested (ask before creating one)
+- deploy.md documents Zone · Zone WAF · Edit, which is enough on its own (verified 2026-10-13, see Token permissions)
 
 #### Branch: `feat/rate-limit-rule-controller`
 **Depends on:** `feat/rulesets-foundation`
@@ -823,27 +830,58 @@ creation, idle sync, placement, reordering, drift, deletion), and `WAFCustomRule
   `requests_to_origin` and an empty counting expression; a non-empty one needs a higher plan
 - Stored as sent: characteristics keep the order sent; `requests_to_origin: false` and an empty counting expression
   come back absent, as cloudflare-go sends them
-- deploy.md documents Zone · Zone WAF · Edit, with the same caveat as `WAFCustomRule`: a token holding only that
-  permission has not been tested
+- deploy.md documents Zone · Zone WAF · Edit, which is enough on its own (verified 2026-10-13, see Token permissions)
 
 
 #### Branch: `feat/ip-list-controller`
 **Depends on:** `feat/shared-client`
-**Status:** 🔲 Not started
+**Status:** ✅ Complete
 
-An account-level custom IP list, for expressions such as `ip.src in $office_ips` in WAF custom rules.
+An account-level custom IP list, for expressions such as `ip.src in $office_ips` in rules.
 
-- [ ] `api/v1alpha1/iplist_types.go`: `spec.accountRef` and `spec.name` (immutable; check Cloudflare's naming rules
-  live), `description`, `items[]` (`ip`: an IPv4 or IPv6 address or CIDR range; optional `comment`).
-  `status.cloudflareMetadata`: list ID, item count
-- [ ] Controller: by status ID → by name → create (`kind: ip`). Description drift through `UpdateList`, item drift
-  through `ReplaceListItems` (an asynchronous bulk operation; check how the SDK waits for it). Claims its list in a
-  `kflare.dev/ip-list-id` label, like KVNamespace
-- [ ] Deletion: check live whether Cloudflare refuses to delete a list that a rule references. If it does, report
-  `ListInUse` and retry every minute, like `BucketNotEmpty`
-- [ ] The SDK already has the Lists calls (`CreateList`, `GetList`, `UpdateList`, `DeleteList`, `ReplaceListItems`)
-- [ ] Live e2e: one list (Free allows one; the account has none as of 2026-10-09), optionally referenced by the WAF e2e
-  rule
+- [x] `api/v1alpha1/iplist_types.go`: `spec.accountRef` and `spec.name` (immutable; `^[a-z0-9_]{1,50}$`, Cloudflare's
+  rule), `description` (up to 500 characters), `items[]` (a map keyed by `ip`: an address or CIDR range, checked
+  against a character set; optional `comment`, up to 500 characters). `status.cloudflareMetadata`: list ID, item
+  count, and the bulk operation kflare is waiting for. Short name `cfiplist`
+- [x] Controller: lists the account's lists → matches the status ID → adopts the IP list with the same name
+  (`NameConflict` when another IPList claims it or it is a list of another kind) → creates one (`kind: ip`); claims it
+  in `kflare.dev/ip-list-id`. Description drift through `UpdateList`. Items are compared as a set in canonical form,
+  and replaced with `ReplaceListItemsAsync`: the IPList records the operation in status, reports `ReplacingItems` and
+  checks again every 2 seconds, and a failed operation is retried with back-off. Not the SDK's `ReplaceListItems`,
+  which polls for up to 8.5 minutes and would block a worker
+- [x] Deletion: `ListInUse` while a rule uses the list (Cloudflare refuses, 10041), checked again every minute and
+  re-triggered by the deletion of a rule that uses it. A list whose status was never written is found through its
+  claim. An IPList counts as a user of its account
+- [x] The rule kinds watch IPLists: a rule whose expression uses a list (`$name`) is reconciled once the list exists,
+  since Cloudflare refuses it until then (20127, a terminal error). Added during the branch: without it, a list and a
+  rule applied together could leave the rule failed until the next resync
+- [x] Unit and envtest tests against a fake that follows the live API, and a live e2e spec: a WAF custom rule that uses
+  the list is refused before the list exists and written after; items replaced in place; an idle reconcile leaves the
+  list alone; the all-at-once deletion removes both
+- [x] Sample (a list and a rule that uses it), deploy.md, Helm `edit` role, ARCHITECTURE.md
+
+**IPList design notes (verified live on the dev account, 2026-10-13; the probe lists were deleted):**
+- Names: lowercase letters, digits and underscores, 1–50 characters (else 400, code 10029), unique in the account across
+  list kinds (10021). Only the description can change (a new name: 10076). Descriptions hold at most 500 characters
+  (10018); an empty one comes back as null
+- Free: one IP list (a second: 10019, "maximum number of lists"), but a hostname list was accepted alongside it, so the
+  quota is per kind; 10,000 items in the account (10020)
+- Replacing items checks them all before it starts and refuses the whole request (400): an invalid address, including a
+  zone or leading zeros (10037); host bits set (10036); an IPv4 range outside /8–/32 (10034) or an IPv6 one outside
+  /12–/128 (10035); an IPv4-mapped IPv6 address (10080); one address twice, in any form (10028); a comment over 500
+  characters (10022). Overlapping ranges are fine, and an empty array empties the list
+- The replace runs as a bulk operation (`pending`, `running`, `completed`, `failed`): one finished within a second,
+  10,000 items within a few. Operations run in order, so the later of two replaces wins. An unknown operation is a
+  404 (10001)
+- Cloudflare stores a /32 or /128 as the address and IPv6 in lowercase, compressed; comments verbatim (whitespace,
+  newlines, Unicode), an empty one as null; items in no particular order. Items come 25 to a page by default and 500
+  at most (a larger page: a misleading 10027, "invalid or expired cursor")
+- An unknown list is a 404 (10001), but DELETE is idempotent (200 for an unknown ID). Deleting a list a ruleset rule
+  uses: 400, 10041, "This list is referenced by at least one ruleset rule". The list's `num_referencing_filters` stays 0
+  meanwhile, so it cannot tell kflare whether a rule uses the list
+- A rule that uses a list the account does not have: 400, 20127, "the list ... is unknown"
+- deploy.md documents Account · Account Rule Lists · Edit (the API's Account Rule Lists Write), which is enough on its
+  own (verified 2026-10-13, see Token permissions)
 
 
 #### Branch: `feat/zero-trust-controllers`
@@ -921,9 +959,10 @@ Each is the foundation plus typed action parameters. Together they replace Page 
 
 - [ ] Run the live e2e suite in GitHub Actions. The repo has no Actions secrets or variables yet (2026-10-09). Use a
   dedicated CI token holding only what the suite needs, not the dev token, which also holds Account API Tokens Write
-  and Registrar Domains Admin. Set the secrets `CF_API_TOKEN` and `CF_ACCOUNT_ID`, and the variable
-  `CF_E2E_ZONE=kflare.dev`. A Free zone holds one rate limiting rule, so runs must not overlap: give the workflow a
-  `concurrency` group, and avoid local runs while it runs
+  and Registrar Domains Admin. What the suite needs is deploy.md's permissions, with Zone Read (verified 2026-10-13,
+  see Token permissions). Set the secrets `CF_API_TOKEN` and `CF_ACCOUNT_ID`, and the variable
+  `CF_E2E_ZONE=kflare.dev`. A Free zone holds one rate limiting rule and a Free account one IP list, so runs must
+  not overlap: give the workflow a `concurrency` group, and avoid local runs while it runs
 - [ ] Tag `v0.1.0`: `Chart.yaml` is already at 0.1.0 and no tag exists. The release workflow publishes the image and
   chart. (`docs/deploy.md`'s stale "the six kflare CRDs" was fixed with WAFCustomRule)
 - [ ] `kflare.dev` expires on 2027-10-04 with auto-renew off (registered 2026-10-04). The e2e zone disappears if it
@@ -1042,8 +1081,8 @@ export CF_E2E_ZONE=kflare.dev               # zone for the DNS e2e specs; adopte
 
 ## Current Status
 
-> **Phases 1 and 2 complete. Phase 3 in progress: `KVNamespace`, `R2Bucket`, `WAFCustomRule` and `RateLimitRule`
-> done.** cloudflare-go is at v0.119; rule kinds share the Rulesets foundation and controller. Next: `IPList` (see
-> Phase 3). Items needing a paid plan, add-on or account setup are tracked under "Deferred: paid plan, add-on or
-> account setup" in Phase 3.
+> **Phases 1 and 2 complete. Phase 3 in progress: `KVNamespace`, `R2Bucket`, `WAFCustomRule`, `RateLimitRule` and
+> `IPList` done.** cloudflare-go is at v0.119; rule kinds share the Rulesets foundation and controller. Next:
+> `ManagedRuleset`, since Zero Trust still waits on account setup (see Phase 3). Items needing a paid plan, add-on
+> or account setup are tracked under "Deferred: paid plan, add-on or account setup" in Phase 3.
 > Last updated: October 2026

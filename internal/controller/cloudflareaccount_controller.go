@@ -118,6 +118,7 @@ func (r *CloudflareAccountReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&cloudflarev1alpha1.WorkerScript{}, dependent, dependentDeleted).
 		Watches(&cloudflarev1alpha1.KVNamespace{}, dependent, dependentDeleted).
 		Watches(&cloudflarev1alpha1.R2Bucket{}, dependent, dependentDeleted).
+		Watches(&cloudflarev1alpha1.IPList{}, dependent, dependentDeleted).
 		Complete(r)
 }
 

@@ -175,6 +175,13 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "RateLimitRule")
 		os.Exit(1)
 	}
+	if err = (&controller.IPListReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "IPList")
+		os.Exit(1)
+	}
 	if err = (&controller.KVNamespaceReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),

@@ -46,6 +46,10 @@ func (e *conditionError) Error() string { return e.Message }
 // different CloudflareAccount than the resource referring to it.
 const reasonAccountMismatch = "AccountMismatch"
 
+// reasonNameConflict reports that the Cloudflare object a resource names is
+// already taken: managed by another resource, or of another kind.
+const reasonNameConflict = "NameConflict"
+
 // setReady sets obj's Ready condition for its current generation, in memory.
 func setReady(obj conditionedObject, status metav1.ConditionStatus, reason, message string) {
 	conditions := obj.GetConditions()
