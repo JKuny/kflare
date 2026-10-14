@@ -1,0 +1,38 @@
+# Kinds for kflare-gen's golden tests, each generated from a real cloudflare-go v7 service. Regenerate the golden
+# files with: go test ./generator -run TestGolden -update
+kinds:
+  # Every field of the KV namespace service: an optional create-only enum (jurisdiction) and a computed bool.
+  - kind: TestKVNamespace
+    service: kv.NamespaceService
+    scope: account
+    shortName: testkv
+    noun: KV namespace
+    doc: TestKVNamespace exposes every field of the KV namespace service.
+    id:
+      field: id
+      status: namespaceID
+    claimLabel: kflare.dev/test-kv-namespace-id
+
+  # A custom list: required create-only fields (kind, an enum, and name), an updatable optional one, computed strings.
+  - kind: TestList
+    service: rules.ListService
+    scope: account
+    shortName: testlist
+    noun: list
+    doc: |
+      TestList is a custom list. Its numbers are left out until the OpenAPI
+      spec tells that they are integers.
+    id:
+      field: id
+      status: listID
+    claimLabel: kflare.dev/test-list-id
+    fields:
+      name:
+        printColumn: Name
+      description:
+        maxLength: 500
+      created_on:
+        printColumn: Created
+    ignore:
+      num_items: A float64 in the SDK; only the OpenAPI spec tells it is an integer.
+      num_referencing_filters: A float64 in the SDK; only the OpenAPI spec tells it is an integer.
