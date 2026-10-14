@@ -14,6 +14,7 @@ resources:
 - bases/kflare.dev_wafcustomrules.yaml
 - bases/kflare.dev_ratelimitrules.yaml
 - bases/kflare.dev_iplists.yaml
+- bases/kflare.dev_managedrulesets.yaml
 #+kubebuilder:scaffold:crdkustomizeresource
 
 #patches:

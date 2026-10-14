@@ -37,11 +37,12 @@ Create an API token in the Cloudflare dashboard (**My Profile → API Tokens**, 
 | `WorkerRoute` | Zone · Workers Routes · Edit |
 | `KVNamespace` | Account · Workers KV Storage · Edit |
 | `R2Bucket` | Account · Workers R2 Storage · Edit |
-| `WAFCustomRule`, `RateLimitRule` | Zone · Zone WAF · Edit |
+| `WAFCustomRule`, `RateLimitRule`, `ManagedRuleset` | Zone · Zone WAF · Edit |
 | `IPList` | Account · Account Rule Lists · Edit |
 
 These are enough on their own: in October 2026 a token holding only them (with Zone · Zone · Read, and without
-Billing) ran kflare's full live test suite against an existing zone. Scope zone permissions to the zones kflare
+Billing) ran kflare's full live test suite against an existing zone. `ManagedRuleset` came after that run, so Zone WAF
+alone has not been checked for it yet. Scope zone permissions to the zones kflare
 should manage. Note the account ID, shown on the account's overview page.
 
 ## 2. Install the chart
@@ -132,6 +133,7 @@ Every other kind references the account (or a resource that does). Examples are 
 | `WAFCustomRule` | Namespaced | `zoneRef` (same namespace) | [block and skip rules](../config/samples/cloudflare_v1alpha1_wafcustomrule.yaml) |
 | `RateLimitRule` | Namespaced | `zoneRef` (same namespace) | [API rate limit](../config/samples/cloudflare_v1alpha1_ratelimitrule.yaml) |
 | `IPList` | Namespaced | `accountRef`; rule expressions use it as `$name` | [office addresses and a rule using them](../config/samples/cloudflare_v1alpha1_iplist.yaml) |
+| `ManagedRuleset` | Namespaced | `zoneRef` (same namespace) | [Free Managed Ruleset with overrides](../config/samples/cloudflare_v1alpha1_managedruleset.yaml) |
 
 Things to know before pointing kflare at existing infrastructure:
 
@@ -158,6 +160,12 @@ Things to know before pointing kflare at existing infrastructure:
   delete a list that a rule uses: kflare writes such a rule once the list exists, and deletes the list once
   its rules are gone (reporting `ListInUse` meanwhile). Free accounts can have one IP list, with up to
   10,000 items.
+- **Managed rulesets.** Cloudflare deploys its Free Managed Ruleset to Free zones by default, but only while the
+  zone has no rules of its own in the managed phase. A `ManagedRuleset` deploys a ruleset explicitly, so the zone
+  keeps it; to turn it off, set the ManagedRuleset's `enabled: false` rather than deleting it. Deleting the last
+  ManagedRuleset in a zone hands it back to Cloudflare's default. A zone deploys each ruleset once: a second
+  deployment, or one a rule created outside kflare already makes, reports `RulesetConflict`. Free zones can only
+  deploy the Free Managed Ruleset.
 - **Immutable fields.** Names and references (`spec.name`, `accountRef`, `zoneRef`, DNS `type`, ...) cannot be
   changed. Create a new resource instead.
 
@@ -244,7 +252,7 @@ Order matters, because kflare's finalizers need the controller running to clean 
    R2Bucket `retain`.
 
    ```sh
-   kubectl delete zones.kflare.dev,dnsrecords.kflare.dev,workerroutes.kflare.dev,wafcustomrules.kflare.dev,ratelimitrules.kflare.dev,iplists.kflare.dev,tunnels.kflare.dev,tunnelconfigurations.kflare.dev,workerscripts.kflare.dev,kvnamespaces.kflare.dev,r2buckets.kflare.dev --all -A
+   kubectl delete zones.kflare.dev,dnsrecords.kflare.dev,workerroutes.kflare.dev,wafcustomrules.kflare.dev,ratelimitrules.kflare.dev,managedrulesets.kflare.dev,iplists.kflare.dev,tunnels.kflare.dev,tunnelconfigurations.kflare.dev,workerscripts.kflare.dev,kvnamespaces.kflare.dev,r2buckets.kflare.dev --all -A
    kubectl delete cloudflareaccounts.kflare.dev --all
    ```
 
@@ -319,6 +327,7 @@ kubectl -n kflare-system logs deploy/kflare           # controller log (JSON)
 | `NameConflict` | Another `R2Bucket` already manages a bucket with this name in the same Cloudflare account, another `IPList` a list with this name, or the account has a list of another kind with this name | Keep one R2Bucket per bucket and one IPList per list; list names are unique across list kinds |
 | `R2BucketNotFound`, `R2BucketNotReady` | A WorkerScript's `r2BucketRef` names a missing or not-yet-ready R2Bucket | Check the R2Bucket; it must use the Worker's account |
 | `ReplacingItems` | Cloudflare is replacing an `IPList`'s items in the background | Nothing: kflare checks again every 2 seconds |
+| `RulesetConflict` | Another rule in the zone already deploys the `ManagedRuleset`'s managed ruleset: another ManagedRuleset, or a rule made in the dashboard or the API | Keep one ManagedRuleset per ruleset and zone, or delete the other rule; kflare checks again every minute |
 | `ListInUse` | A deleted `IPList`'s list is still used by a rule, and Cloudflare does not delete it until no rule does | Remove the `$name` from the rules that use it (a kflare rule's goes with its resource), or annotate the IPList `kflare.dev/deletion-policy: retain` to keep the list |
 | `BucketNotEmpty` | A deleted `R2Bucket`'s bucket still holds objects; kflare does not delete them | Empty the bucket, or annotate the R2Bucket `kflare.dev/deletion-policy: retain` to keep it |
 | `InUse` | A `CloudflareAccount`, `Zone`, `Tunnel`, `KVNamespace` or `R2Bucket` being deleted is still referenced | Delete the resources listed in the message |

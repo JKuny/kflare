@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -28,8 +30,8 @@ import (
 	"github.com/JonathanGraniero/kflare/pkg/reconciler"
 )
 
-// Every rule kind (WAFCustomRule, RateLimitRule, and the kinds to come)
-// reconciles the same way: wait for the Zone, resolve the account's token,
+// Every rule kind (WAFCustomRule, RateLimitRule, ManagedRuleset, and the kinds
+// to come) reconciles the same way: wait for the Zone, resolve the account's token,
 // write the one rule the resource manages with syncRulesetRule
 // (rulesetrule.go), and delete it with the resource. The kind's own
 // controller supplies only what differs: its phase and how its spec becomes a
@@ -61,11 +63,27 @@ type rulesetRuleKind struct {
 	// its ref. It sets every field the rule should have: an update replaces
 	// the whole rule.
 	definition func(rulesetRuleObject) cf.RulesetRule
+	// conflicts maps the Cloudflare error codes that mean another rule holds
+	// something the kind's rule needs to the condition reason to report. A
+	// resource that gets one checks again every minute instead of failing:
+	// the other rule may be about to go.
+	conflicts map[int]string
+}
+
+// conflict returns the condition reason for err when it carries one of the
+// kind's conflict codes.
+func (k rulesetRuleKind) conflict(err error) (string, bool) {
+	for _, code := range slices.Sorted(maps.Keys(k.conflicts)) {
+		if cfpkg.HasErrorCode(err, code) {
+			return k.conflicts[code], true
+		}
+	}
+	return "", false
 }
 
 // rulesetRuleKinds lists every rule kind. The rules of all the kinds that
 // share a phase are kept in one order (see syncRulesetRule).
-var rulesetRuleKinds = []rulesetRuleKind{wafCustomRuleKind, rateLimitRuleKind}
+var rulesetRuleKinds = []rulesetRuleKind{wafCustomRuleKind, rateLimitRuleKind, managedRulesetKind}
 
 // rulesetRuleReconciler reconciles the resources of one rule kind. Each kind's
 // exported reconciler delegates to one.
@@ -130,6 +148,12 @@ func (r *rulesetRuleReconciler) reconcile(ctx context.Context, req ctrl.Request)
 	rule := r.kind.definition(obj)
 	rule.Ref = rulesetRuleRef(r.kind.name, obj.GetNamespace(), obj.GetName())
 	state, err := syncRulesetRule(ctx, cfAPI, zoneID, r.kind.phase, rule, peers)
+	if reason, ok := r.kind.conflict(err); ok {
+		return notReadyRetryAfter(ctx, r.Client, obj, &conditionError{
+			Reason:  reason,
+			Message: fmt.Sprintf("Cloudflare refused the rule: %v", err),
+		})
+	}
 	if err != nil {
 		return handleCloudflareError(ctx, r.Client, obj, err)
 	}
@@ -264,20 +288,78 @@ func (r *rulesetRuleReconciler) deleteCloudflareRule(ctx context.Context, obj ru
 	if err != nil {
 		return err
 	}
+	// In a phase whose emptied entry point kflare deletes, it stays while
+	// another resource is about to write its rule there.
+	peersRemain := false
+	if emptiedEntrypointPhases[r.kind.phase] {
+		peers, err := r.peers(ctx, zoneID)
+		if err != nil {
+			return err
+		}
+		peersRemain = len(peers) > 0
+	}
 	return deleteRulesetRule(ctx, cfAPI, zoneID, r.kind.phase,
-		rulesetRuleRef(r.kind.name, obj.GetNamespace(), obj.GetName()))
+		rulesetRuleRef(r.kind.name, obj.GetNamespace(), obj.GetName()), peersRemain)
 }
 
 // setup registers the kind's controller, with rec as its reconciler. It
 // watches Zones, so a rule waiting for its Zone is reconciled as soon as the
 // Zone is ready, and IPLists, so a rule that uses a list is written once the
-// list exists.
+// list exists. In a phase whose emptied entry point kflare deletes, it also
+// watches the deletion of every rule kind in the phase (see
+// rulesInZoneOfDeleted).
 func (r *rulesetRuleReconciler) setup(mgr ctrl.Manager, rec reconcile.Reconciler) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(r.kind.newObject()).
 		Watches(&cloudflarev1alpha1.Zone{}, handler.EnqueueRequestsFromMapFunc(r.rulesForZone)).
-		Watches(&cloudflarev1alpha1.IPList{}, handler.EnqueueRequestsFromMapFunc(r.rulesUsingList)).
-		Complete(rec)
+		Watches(&cloudflarev1alpha1.IPList{}, handler.EnqueueRequestsFromMapFunc(r.rulesUsingList))
+	if emptiedEntrypointPhases[r.kind.phase] {
+		for _, kind := range rulesetRuleKinds {
+			if kind.phase == r.kind.phase {
+				b = b.Watches(kind.newObject(), handler.EnqueueRequestsFromMapFunc(r.rulesInZoneOfDeleted),
+					builder.WithPredicates(deletesOnly))
+			}
+		}
+	}
+	return b.Complete(rec)
+}
+
+// rulesInZoneOfDeleted maps the deletion of a rule resource in a phase whose
+// emptied entry point kflare deletes to the kind's resources that may have
+// lost their rule with it: those last synced to the same Cloudflare zone, and
+// those not synced yet. A resource that deletes the last rule there deletes
+// the entry point too, and with it any rule another resource wrote in the
+// moment between; the other resource's reconcile writes it again. It also
+// lets a resource refused as a conflict with the deleted one write its rule
+// at once rather than at its next retry.
+func (r *rulesetRuleReconciler) rulesInZoneOfDeleted(ctx context.Context, deleted client.Object) []reconcile.Request {
+	rule, ok := deleted.(rulesetRuleObject)
+	if !ok {
+		return nil
+	}
+	zoneID := rule.GetRulesetRuleStatus().CloudflareMetadata.ZoneID
+	list := r.kind.newList()
+	if err := r.List(ctx, list); err != nil {
+		return nil
+	}
+	items, err := meta.ExtractList(list)
+	if err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for _, item := range items {
+		obj, ok := item.(rulesetRuleObject)
+		if !ok {
+			continue
+		}
+		synced := obj.GetRulesetRuleStatus().CloudflareMetadata.ZoneID
+		if zoneID == "" || synced == "" || synced == zoneID {
+			reqs = append(reqs, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()},
+			})
+		}
+	}
+	return reqs
 }
 
 // The rule kinds' controllers watch IPLists.

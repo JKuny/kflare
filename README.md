@@ -38,7 +38,9 @@ Early development. Phase 1 (foundation) and Phase 2 (core resources) are complet
 
 - `IPList` — manages a custom IP list in a Cloudflare account, which rule expressions use as `$name` (for example `ip.src in $office_ips`); a rule applied together with its list is written once the list exists, and the list is deleted once no rule uses it (see [the sample](config/samples/cloudflare_v1alpha1_iplist.yaml))
 
-**Planned next:** more of Phase 3 — managed rulesets; a code generator that builds CRDs and controllers from Cloudflare's Go SDK and API schema, which then produces the rules that replace Page Rules (transform, redirect, cache, configuration and origin rules) and more resources; Zero Trust and managed transforms; load balancers last (see [CLAUDE.md](./CLAUDE.md)).
+- `ManagedRuleset` — deploys a Cloudflare managed ruleset to a `Zone`, such as the Free Managed Ruleset, with overrides for the whole ruleset, a category or a single rule; deleting the last one hands the zone back to Cloudflare's default deployment (see [the sample](config/samples/cloudflare_v1alpha1_managedruleset.yaml))
+
+**Planned next:** more of Phase 3 — a code generator that builds CRDs and controllers from Cloudflare's Go SDK and API schema, which then produces the rules that replace Page Rules (transform, redirect, cache, configuration and origin rules) and more resources; Zero Trust and managed transforms; load balancers last (see [CLAUDE.md](./CLAUDE.md)).
 
 ## Install
 

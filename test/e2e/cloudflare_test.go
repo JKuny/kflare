@@ -37,10 +37,16 @@ const (
 	// e2eNamespace holds the namespaced resources the Cloudflare specs create.
 	e2eNamespace = "kflare-e2e"
 
-	// customRulesPhase and rateLimitPhase are the Rulesets phases of WAF
-	// custom rules and rate limiting rules.
+	// customRulesPhase, rateLimitPhase and managedPhase are the Rulesets
+	// phases of WAF custom rules, rate limiting rules and managed ruleset
+	// deployments.
 	customRulesPhase = "http_request_firewall_custom"
 	rateLimitPhase   = "http_ratelimit"
+	managedPhase     = "http_request_firewall_managed"
+
+	// freeManagedRulesetID is the Cloudflare Free Managed Ruleset, the
+	// managed ruleset a Free zone can deploy.
+	freeManagedRulesetID = "77454fe2d30c4220b5701f6fdfb893ba"
 
 	// e2eTimeout bounds each wait for the manager or Cloudflare to converge.
 	e2eTimeout = 2 * time.Minute
@@ -57,7 +63,9 @@ const (
 // by the specs, or by the cleanup below if a spec fails part-way. The rule
 // specs need room in CF_E2E_ZONE: a Free zone allows one rate limiting rule,
 // so the zone must hold no other, and two runs cannot share the zone at once.
-// Likewise a Free account holds one IP list, so it must hold no other.
+// Likewise a Free account holds one IP list, so it must hold no other, and a
+// zone deploys a managed ruleset at most once, so no rule in the zone may
+// deploy the Free Managed Ruleset already.
 var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 	var (
 		ctx       = context.Background()
@@ -69,7 +77,7 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 
 		accountKey, tunnelKey, tunnelConfigKey, workerKey, zoneKey, recordKey client.ObjectKey
 		routeKey, exclusionKey, kvKey, bucketKey, wafKey, wafSkipKey          client.ObjectKey
-		rateLimitKey, listKey, listRuleKey                                    client.ObjectKey
+		rateLimitKey, listKey, listRuleKey, managedKey                        client.ObjectKey
 
 		tunnelID, zoneID, recordID, routeID, exclusionID, kvNamespaceID, listID string
 	)
@@ -135,6 +143,7 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		rateLimitKey = client.ObjectKey{Namespace: e2eNamespace, Name: "rate-limit"}
 		listKey = client.ObjectKey{Namespace: e2eNamespace, Name: "ip-list"}
 		listRuleKey = client.ObjectKey{Namespace: e2eNamespace, Name: "waf-list"}
+		managedKey = client.ObjectKey{Namespace: e2eNamespace, Name: "managed-ruleset"}
 
 		DeferCleanup(func() {
 			By("removing anything this run left behind in Cloudflare")
@@ -152,6 +161,11 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 				cleanupRules(ctx, cfAPI, zoneID, customRulesPhase, ruleRef("WAFCustomRule", wafKey),
 					ruleRef("WAFCustomRule", wafSkipKey), ruleRef("WAFCustomRule", listRuleKey))
 				cleanupRules(ctx, cfAPI, zoneID, rateLimitPhase, ruleRef("RateLimitRule", rateLimitKey))
+				cleanupRules(ctx, cfAPI, zoneID, managedPhase, ruleRef("ManagedRuleset", managedKey))
+				// An entry point in the managed phase, even an empty one,
+				// stops Cloudflare's default deployment of the Free Managed
+				// Ruleset; deleting it restores the zone as found.
+				cleanupEmptyEntrypoint(ctx, cfAPI, zoneID, managedPhase)
 			}
 			// After the rules: Cloudflare does not delete a list a rule uses.
 			cleanupList(ctx, cfAPI, accountRC, listName())
@@ -487,6 +501,66 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		expectIdle(ctx, k8s, cfAPI, zoneID, rateLimitPhase, rule)
 	})
 
+	It("deploys the Free Managed Ruleset, updates its overrides in place and then leaves it alone", func() {
+		if zoneName == "" {
+			Skip("CF_E2E_ZONE is not set")
+		}
+		deployment := &cloudflarev1alpha1.ManagedRuleset{
+			ObjectMeta: objectMeta(managedKey),
+			Spec: cloudflarev1alpha1.ManagedRulesetSpec{
+				RulesetRuleSpec: cloudflarev1alpha1.RulesetRuleSpec{
+					ZoneRef:     corev1.LocalObjectReference{Name: zoneKey.Name},
+					Expression:  "true",
+					Description: "kflare e2e " + run,
+				},
+				RulesetID: freeManagedRulesetID,
+				Overrides: &cloudflarev1alpha1.ManagedRulesetOverrides{
+					Categories: []cloudflarev1alpha1.ManagedRulesetCategoryOverride{
+						{Category: "wordpress", Action: "log"},
+						{Category: "log4j", Action: "managed_challenge"},
+					},
+				},
+			},
+		}
+		Expect(k8s.Create(ctx, deployment)).To(Succeed())
+		expectReady(managedKey, deployment, func() []metav1.Condition { return deployment.Status.Conditions })
+		ref := ruleRef("ManagedRuleset", managedKey)
+		Expect(deployment.Status.CloudflareMetadata.Ref).To(Equal(ref))
+
+		cfRule, ok := ruleByRef(phaseRules(ctx, cfAPI, zoneID, managedPhase), ref)
+		Expect(ok).To(BeTrue(), "Cloudflare has no rule with ref %s", ref)
+		Expect(cfRule.ID).To(Equal(deployment.Status.CloudflareMetadata.RuleID))
+		Expect(cfRule.Action).To(Equal("execute"))
+		Expect(cfRule.Expression).To(Equal("true"))
+		Expect(cfRule.Description).To(Equal(deployment.Spec.Description))
+		Expect(cfRule.ActionParameters).NotTo(BeNil())
+		Expect(cfRule.ActionParameters.ID).To(Equal(freeManagedRulesetID))
+		Expect(cfRule.ActionParameters.Version).To(Equal(cf.StringPtr("latest")))
+		Expect(cfRule.ActionParameters.Overrides).To(Equal(&cf.RulesetRuleActionParametersOverrides{
+			Categories: []cf.RulesetRuleActionParametersCategories{
+				{Category: "log4j", Action: "managed_challenge"},
+				{Category: "wordpress", Action: "log"},
+			},
+		}))
+
+		By("turning a rule off, which updates the deployment in place")
+		patch := client.MergeFrom(deployment.DeepCopy())
+		deployment.Spec.Overrides.Rules = []cloudflarev1alpha1.ManagedRulesetRuleOverride{
+			{ID: "9f7e454e4cad45abbcc40696037f70df", Enabled: cf.BoolPtr(false)}, // Shellshock
+		}
+		Expect(k8s.Patch(ctx, deployment, patch)).To(Succeed())
+		Eventually(func(g Gomega) {
+			updated, ok := ruleByRef(phaseRules(ctx, cfAPI, zoneID, managedPhase), ref)
+			g.Expect(ok).To(BeTrue(), "Cloudflare has no rule with ref %s", ref)
+			g.Expect(updated.ID).To(Equal(cfRule.ID))
+			g.Expect(updated.ActionParameters.Overrides.Rules).To(Equal([]cf.RulesetRuleActionParametersRules{
+				{ID: "9f7e454e4cad45abbcc40696037f70df", Enabled: cf.BoolPtr(false)},
+			}))
+		}, e2eTimeout, e2ePoll).Should(Succeed())
+
+		expectIdle(ctx, k8s, cfAPI, zoneID, managedPhase, deployment)
+	})
+
 	It("manages an IP list, and writes a rule that uses it once the list exists", func() {
 		var rule *cloudflarev1alpha1.WAFCustomRule
 		if zoneName != "" {
@@ -590,6 +664,7 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 			&cloudflarev1alpha1.WAFCustomRule{ObjectMeta: objectMeta(wafKey)},
 			&cloudflarev1alpha1.WAFCustomRule{ObjectMeta: objectMeta(wafSkipKey)},
 			&cloudflarev1alpha1.RateLimitRule{ObjectMeta: objectMeta(rateLimitKey)},
+			&cloudflarev1alpha1.ManagedRuleset{ObjectMeta: objectMeta(managedKey)},
 			&cloudflarev1alpha1.WAFCustomRule{ObjectMeta: objectMeta(listRuleKey)},
 			&cloudflarev1alpha1.IPList{ObjectMeta: objectMeta(listKey)},
 			&cloudflarev1alpha1.DNSRecord{ObjectMeta: objectMeta(recordKey)},
@@ -637,6 +712,9 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 			}
 			_, ok := ruleByRef(phaseRules(ctx, cfAPI, zoneID, rateLimitPhase), ruleRef("RateLimitRule", rateLimitKey))
 			Expect(ok).To(BeFalse(), "the rate limiting rule was not deleted")
+			_, err = cfAPI.GetEntrypointRuleset(ctx, cf.ZoneIdentifier(zoneID), managedPhase)
+			Expect(cfpkg.IsNotFound(err)).To(BeTrue(),
+				"the managed phase's emptied entry point was not deleted, which leaves Cloudflare's default off: %v", err)
 			_, err = cfAPI.ZoneDetails(ctx, zoneID)
 			Expect(err).NotTo(HaveOccurred(), "the retained zone must still exist")
 		}
@@ -799,6 +877,26 @@ func cleanupList(ctx context.Context, api *cf.API, rc *cf.ResourceContainer, nam
 		if _, err := api.DeleteList(ctx, rc, list.ID); err != nil {
 			GinkgoWriter.Printf("cleanup: deleting IP list %s: %v\n", list.ID, err)
 		}
+	}
+}
+
+// cleanupEmptyEntrypoint deletes the zone's entry point in phase if it holds
+// no rules. It only reports problems: it runs after the specs, whether or not
+// they passed.
+func cleanupEmptyEntrypoint(ctx context.Context, api *cf.API, zoneID, phase string) {
+	zrc := cf.ZoneIdentifier(zoneID)
+	ruleset, err := api.GetEntrypointRuleset(ctx, zrc, phase)
+	if err != nil {
+		if !cfpkg.IsNotFound(err) {
+			GinkgoWriter.Printf("cleanup: reading the %s entry point: %v\n", phase, err)
+		}
+		return
+	}
+	if len(ruleset.Rules) > 0 {
+		return
+	}
+	if err := api.DeleteRuleset(ctx, zrc, ruleset.ID); err != nil && !cfpkg.IsNotFound(err) {
+		GinkgoWriter.Printf("cleanup: deleting the empty %s entry point: %v\n", phase, err)
 	}
 }
 

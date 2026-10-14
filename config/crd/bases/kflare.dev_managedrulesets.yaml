@@ -1,0 +1,318 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: managedrulesets.kflare.dev
+spec:
+  group: kflare.dev
+  names:
+    kind: ManagedRuleset
+    listKind: ManagedRulesetList
+    plural: managedrulesets
+    shortNames:
+    - cfmanaged
+    singular: managedruleset
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.rulesetID
+      name: Ruleset
+      type: string
+    - jsonPath: .spec.priority
+      name: Priority
+      type: integer
+    - jsonPath: .status.cloudflareMetadata.ruleID
+      name: Rule ID
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ManagedRuleset is the Schema for the managedrulesets API.
+          It deploys a Cloudflare managed ruleset to a zone. Cloudflare deploys its
+          Free Managed Ruleset to Free zones by default, but only while the zone has
+          no rules of its own in the http_request_firewall_managed phase: as soon as
+          any rule is there, only what the rules deploy runs. To turn a managed
+          ruleset off, keep its ManagedRuleset and set enabled to false.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ManagedRulesetSpec defines the desired state of ManagedRuleset: the
+              deployment of one Cloudflare managed ruleset to the zone, as an execute rule
+              in its http_request_firewall_managed phase. The rule's expression selects
+              the requests the managed ruleset inspects; "true" selects every request.
+            properties:
+              description:
+                description: Description is shown with the rule in the Cloudflare
+                  dashboard.
+                maxLength: 4096
+                type: string
+              enabled:
+                default: true
+                description: Enabled turns the rule on or off without deleting it.
+                type: boolean
+              expression:
+                description: |-
+                  Expression selects the requests the rule applies to, in Cloudflare's
+                  Rules language, for example `http.request.uri.path eq "/admin"`.
+                  Cloudflare validates it; the fields and operators it may use depend on
+                  the zone's plan.
+                maxLength: 4096
+                minLength: 1
+                type: string
+              overrides:
+                description: |-
+                  Overrides change what the ruleset's rules do. An override for a rule
+                  takes precedence over one for a category the rule is tagged with, which
+                  takes precedence over the overrides for the whole ruleset.
+                properties:
+                  action:
+                    description: Action replaces the action of every rule of the ruleset.
+                    enum:
+                    - block
+                    - challenge
+                    - js_challenge
+                    - managed_challenge
+                    - log
+                    type: string
+                  categories:
+                    description: |-
+                      Categories override the rules tagged with a category, such as
+                      wordpress or log4j. Cloudflare refuses a category none of the ruleset's
+                      rules has.
+                    items:
+                      description: ManagedRulesetCategoryOverride overrides the rules
+                        tagged with a category.
+                      properties:
+                        action:
+                          description: Action replaces the action of the category's
+                            rules.
+                          enum:
+                          - block
+                          - challenge
+                          - js_challenge
+                          - managed_challenge
+                          - log
+                          type: string
+                        category:
+                          description: Category is the tag the overridden rules have.
+                          minLength: 1
+                          type: string
+                        enabled:
+                          description: Enabled turns the category's rules on or off.
+                          type: boolean
+                      required:
+                      - category
+                      type: object
+                      x-kubernetes-validations:
+                      - message: a category override needs enabled or action
+                        rule: has(self.enabled) || has(self.action)
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - category
+                    x-kubernetes-list-type: map
+                  enabled:
+                    description: Enabled turns every rule of the ruleset on or off.
+                    type: boolean
+                  rules:
+                    description: Rules override single rules of the ruleset, by ID.
+                    items:
+                      description: ManagedRulesetRuleOverride overrides one rule of
+                        a managed ruleset.
+                      properties:
+                        action:
+                          description: Action replaces the rule's action.
+                          enum:
+                          - block
+                          - challenge
+                          - js_challenge
+                          - managed_challenge
+                          - log
+                          type: string
+                        enabled:
+                          description: Enabled turns the rule on or off.
+                          type: boolean
+                        id:
+                          description: ID is the rule's ID in the managed ruleset.
+                          pattern: ^[0-9a-f]{32}$
+                          type: string
+                      required:
+                      - id
+                      type: object
+                      x-kubernetes-validations:
+                      - message: a rule override needs enabled or action
+                        rule: has(self.enabled) || has(self.action)
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - id
+                    x-kubernetes-list-type: map
+                type: object
+                x-kubernetes-validations:
+                - message: overrides must override something
+                  rule: has(self.enabled) || has(self.action) || (has(self.categories)
+                    && size(self.categories) > 0) || (has(self.rules) && size(self.rules)
+                    > 0)
+              priority:
+                description: |-
+                  Priority orders the rules kflare manages in a zone and phase: lower runs
+                  first, and rules with the same priority run in order of namespace and
+                  name. Rules created outside kflare keep their place.
+                format: int32
+                type: integer
+              rulesetID:
+                description: |-
+                  RulesetID is the managed ruleset to deploy. Free plans can deploy the
+                  Cloudflare Free Managed Ruleset, 77454fe2d30c4220b5701f6fdfb893ba; higher
+                  plans also the Cloudflare Managed Ruleset,
+                  efb7b8c949ac4650a09736fc376e9aee, and the OWASP Core Ruleset,
+                  4814384a9e5d4991b9815dcfc25d2f1f. Cloudflare always runs the ruleset's
+                  latest version. A zone can deploy a ruleset only once. Immutable after
+                  creation.
+                pattern: ^[0-9a-f]{32}$
+                type: string
+                x-kubernetes-validations:
+                - message: rulesetID is immutable
+                  rule: self == oldSelf
+              zoneRef:
+                description: |-
+                  ZoneRef references the Zone, in the same namespace, the rule belongs to.
+                  Immutable after creation.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+                x-kubernetes-validations:
+                - message: zoneRef is immutable
+                  rule: self == oldSelf
+            required:
+            - expression
+            - rulesetID
+            - zoneRef
+            type: object
+          status:
+            description: RulesetRuleStatus is the observed state of a rule.
+            properties:
+              cloudflareMetadata:
+                description: CloudflareMetadata identifies the rule in Cloudflare.
+                properties:
+                  ref:
+                    description: |-
+                      Ref is the rule's ref, which kflare derives from the resource's kind,
+                      namespace and name. kflare finds the rule it manages by its ref.
+                    type: string
+                  ruleID:
+                    description: RuleID is the rule's Cloudflare ID.
+                    type: string
+                  rulesetID:
+                    description: RulesetID is the zone's entry point ruleset for the
+                      rule's phase.
+                    type: string
+                  version:
+                    description: |-
+                      Version is the rule's version, which Cloudflare increments whenever the
+                      rule changes.
+                    type: string
+                  zoneID:
+                    description: ZoneID is the Cloudflare zone the rule is in.
+                    type: string
+                type: object
+              conditions:
+                description: Conditions represent the latest available observations
+                  of the rule's state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

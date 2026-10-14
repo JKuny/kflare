@@ -179,8 +179,10 @@ Shared infrastructure that all Phase 2 controllers will use.
     `retain`), a DNSRecord (including a check that an idle reconcile does not write to Cloudflare), a WorkerRoute plus
     exclusion route, two WAFCustomRules (a skip rule placed before a block rule by priority; an idle reconcile leaves
     the ruleset version alone), a RateLimitRule (checked field by field, then updated in place; an idle reconcile
-    leaves it alone), and a WAFCustomRule that uses the IP list (refused while the list does not exist, written once
-    it does). Then everything is deleted in one pass and Cloudflare is checked. Everything is named
+    leaves it alone), a ManagedRuleset deploying the Free Managed Ruleset (overrides checked, a rule override added in
+    place; an idle reconcile leaves it alone), and a WAFCustomRule that uses the IP list (refused while the list does
+    not exist, written once it does). Then everything is deleted in one pass and Cloudflare is checked, including that
+    the managed phase's emptied entry point is gone. Everything is named
     `kflare-e2e-<run>` (the list `kflare_e2e_<run>`) and cleaned up even on failure
   - `KFLARE_E2E_MANAGER=external` uses an already running manager (e.g. `make run`) instead of deploying one
     (first green live run: 2026-10-05, this way, on kind-kflare-dev)
@@ -461,14 +463,15 @@ shared machinery once; each rule CRD on top of it is mostly types plus a convers
 | `feat/rate-limit-rule-controller` | `RateLimitRule` (was `RateLimit`) | rulesets-foundation | ✅ Free: 1 rule, 10 s period and timeout, counts by IP, block only |
 | `feat/ip-list-controller` | `IPList` | shared-client | ✅ Free: 1 IP list, 10,000 items |
 | `feat/zero-trust-controllers` | `AccessGroup`, `AccessPolicy`, `AccessApplication` | shared-client | Blocked: Zero Trust is not enabled on the account (a free plan exists) |
-| `feat/managed-ruleset-controller` | `ManagedRuleset` (was `WAFPackage`) | rulesets-foundation | **Next**, by hand (Zero Trust is blocked; decided 2026-10-13). Free: only the Cloudflare Free Managed Ruleset |
-| Code generator: `feat/cloudflare-go-v7` … `feat/generator-rule-kinds` (8 PRs) | none: `kflare-gen` and the shared CRUD reconciler; KVNamespace moves onto them; the first new generated kind (see [Code generator](#code-generator-kflare-gen)) | — | After `ManagedRuleset` (decided 2026-10-13) |
+| `feat/managed-ruleset-controller` | `ManagedRuleset` (was `WAFPackage`) | rulesets-foundation | ✅ By hand (decided 2026-10-13). Free: only the Cloudflare Free Managed Ruleset, with overrides |
+| Code generator: `feat/cloudflare-go-v7` … `feat/generator-rule-kinds` (8 PRs) | none: `kflare-gen` and the shared CRUD reconciler; KVNamespace moves onto them; the first new generated kind (see [Code generator](#code-generator-kflare-gen)) | — | **Next** (decided 2026-10-13) |
 | `feat/managed-transform-controller` | `ManagedTransform` | zone-controller | Free: all six transforms |
 | `feat/transform-rule-controller` | `TransformRule` | code generator (rule kinds) | Generated. Free: 10 rules, no regex |
 | `feat/redirect-rule-controller` | `RedirectRule` | code generator (rule kinds) | Generated. Free: 10 rules, no regex |
 | `feat/cache-rule-controller` | `CacheRule` | code generator (rule kinds) | Generated. Free: 10 rules |
 | `feat/configuration-rule-controller` | `ConfigurationRule` | code generator (rule kinds) | Generated. Free: 10 rules |
 | `feat/origin-rule-controller` | `OriginRule` | code generator (rule kinds) | Generated. Free: 10 rules, destination port override only |
+| `feat/managed-ruleset-exception-controller` | `ManagedRulesetException` | managed-ruleset-controller | Not scheduled (decided 2026-10-14, see `ManagedRuleset`). Free: skip rules accepted |
 | `feat/load-balancer-monitor-controller` | `LoadBalancerMonitor` | shared-client | ⏸ Deferred: needs Load Balancing add-on |
 | `feat/load-balancer-controller` | `LoadBalancer` (+ pools) | load-balancer-monitor-controller | ⏸ Deferred: needs Load Balancing add-on |
 
@@ -602,7 +605,7 @@ checked 2026-10-09; ✔ marks what a dry run on `kflare.dev` confirmed the same 
 |------|------|-----|----------|
 | WAF custom rules | 5 rules ✔, no regex ✔, no Log action ✔, no custom block response ✔, 1 zone-level custom ruleset | 20 rules | 100 rules, regex |
 | Rate limiting rules | 1 rule ✔, period and mitigation timeout 10 s only ✔, counts by IP ✔, block only ✔, no counting expression ✔, no throttling (`mitigation_timeout: 0`) ✔, custom block response ✔ | 2 rules, periods up to 1 min, mitigation up to 1 h | 5 rules, periods up to 10 min, mitigation up to 1 day |
-| WAF managed rulesets | Cloudflare Free Managed Ruleset only ✔ | + Cloudflare Managed Ruleset, OWASP Core Ruleset, Exposed Credentials Check | same as Pro |
+| WAF managed rulesets | Cloudflare Free Managed Ruleset only ✔, with overrides for the whole ruleset, a category or a rule ✔; no payload logging ✔ | + Cloudflare Managed Ruleset, OWASP Core Ruleset, Exposed Credentials Check | same as Pro |
 | Custom lists | 1 IP list ✔, 10,000 items in the account ✔; the quota is per kind (a hostname list was accepted alongside) | 10 lists, 10,000 items in total | same as Pro |
 | Transform, redirect, cache, configuration and origin rules | 10 rules each; no regex in transform or redirect rules | 25 each | 50 each; regex in transform and redirect rules |
 | Origin rule overrides | destination port only (Host header, SNI and DNS record need Enterprise) | same | same |
@@ -713,7 +716,7 @@ creation, idle sync, placement, reordering, drift, deletion), and `WAFCustomRule
     write. A write that gets a 404 (the rule or ruleset was deleted meanwhile) starts over once. Then it orders the
     peers. It returns the ruleset ID, rule ID and rule version, and whether it wrote or moved anything
   - `deleteRulesetRule(zoneID, phase, ref)`: a missing entry point or rule counts as deleted. The entry point stays,
-    even when emptied
+    even when emptied (except in the managed phase, since `feat/managed-ruleset-controller`)
   - It never PUTs an entry point: that replaces every rule in it, including rules kflare does not manage
 - [x] Ownership on the Cloudflare side through `ref` (`rulesetRuleRef`): `kflare-` + the first 32 hex characters of
   SHA-256 over `<kind>/<namespace>/<name>`. Refs are unique within a ruleset (duplicate: code 20023), at most 128
@@ -907,21 +910,68 @@ An account-level custom IP list, for expressions such as `ip.src in $office_ips`
 
 #### Branch: `feat/managed-ruleset-controller`
 **Depends on:** `feat/rulesets-foundation`
-**Status:** 🔲 Not started
+**Status:** ✅ Complete
 
 Deploys a Cloudflare managed ruleset to a zone, with overrides, through an `execute` rule in the
 `http_request_firewall_managed` phase. Built by hand on the v0.119 foundation (decided 2026-10-13), not generated;
 `feat/rulesets-v7` later moves its conversion to v7 with the other rule kinds.
 
-- [ ] **Verify first:** Cloudflare runs the Free Managed Ruleset on Free zones without any entry point. Does creating an
-  entry point in this phase, for example for a single exception, stop that default deployment? If it does, kflare must
-  keep an explicit `execute` rule in place, or a user who adds an exception silently loses the ruleset
-- [ ] Types: `spec.zoneRef` (immutable), the managed ruleset ID (Free: `77454fe2d30c4220b5701f6fdfb893ba`), overrides
-  (the whole ruleset's enabled state or action; per rule and per category), `enabled`, `priority`. Check with dry runs
-  which overrides Free accepts
-- [ ] Exceptions (`skip` rules in this phase; a dry run accepts them on Free): a separate small kind or part of this
-  one, decided in the branch. They must run before the `execute` rule, which the foundation's ordering has to
-  guarantee across kinds
+- [x] **Verified first** (live on `kflare.dev`, 2026-10-14; see the notes below): any entry point in this phase, even an
+  empty one, stops Cloudflare's default deployment of the Free Managed Ruleset, and deleting the entry point brings it
+  back. So kflare deletes the phase's entry point once deleting a rule leaves it empty
+- [x] `api/v1alpha1/managedruleset_types.go`: the shared rule fields plus `rulesetID` (32 hex characters, immutable)
+  and `overrides`: `enabled` and `action` for the whole ruleset, and `categories[]` and `rules[]` (maps keyed by
+  category and rule ID, each needing `enabled` or `action`), overriding at least something (CEL). Actions: `block`,
+  `challenge`, `js_challenge`, `managed_challenge`, `log`. Short name `cfmanaged`
+- [x] `ManagedRulesetReconciler`: the shared rule controller in the managed phase. Its conversion sorts the category and
+  rule overrides, which Cloudflare keeps in the order sent
+- [x] Foundation changes:
+  - `comparableRule` counts the `version: latest` Cloudflare records on an execute rule as set
+  - `deleteRulesetRule` deletes an entry point it leaves empty in the phases of `emptiedEntrypointPhases` (only this
+    one), unless another kflare resource in the phase and zone is about to write to it (`peersRemain`).
+    `RulesetRuleAPI` gained `DeleteRuleset` (cloudflare-go's, which handles the 204)
+  - A kind can list Cloudflare error codes that mean a conflict (`rulesetRuleKind.conflicts`): the resource reports
+    the reason and checks again every minute. ManagedRuleset lists 20014 as `RulesetConflict`
+  - In this phase the rule controller also watches the deletion of the phase's kinds and re-triggers the kind's
+    resources last synced to the same zone or not synced yet (`rulesInZoneOfDeleted`). A rule written in the moment
+    before the entry point went is written again, and a conflict clears as soon as the other resource is gone
+- [x] A Zone waits for its ManagedRulesets before it is deleted
+- [x] Unit and envtest tests against the Rulesets fake (which now also defaults execute rules to the latest version,
+  refuses a second execute of the same ruleset with 20014 and deletes rulesets), a conversion table, CEL validation,
+  and a live e2e spec (run `21c184`, 14 of 14): the Free Managed Ruleset with category overrides checked field by
+  field, a rule override added in place, an idle reconcile that writes nothing, and the all-at-once deletion leaving no
+  entry point in the phase
+- [x] Sample, deploy.md (permission row, kinds table, uninstall, `RulesetConflict`), Helm `edit` role, ARCHITECTURE.md
+  (new "Managed rulesets" section)
+- **Exceptions** (`skip` rules in this phase) are not in this branch. Decided 2026-10-14: a separate kind,
+  `ManagedRulesetException`, not scheduled yet. An exception alone in the phase would switch off Cloudflare's default
+  deployment, so it must reference a ManagedRuleset (`managedRulesetRef`) and wait for it to be ready. It must also run
+  before the `execute` rule it skips, which needs a rank per kind in the foundation's ordering. Meanwhile a rule or
+  category override with `enabled: false` turns a misfiring rule off for every request
+
+**ManagedRuleset design notes (verified live on `kflare.dev`, 2026-10-14):**
+- The default deployment was checked with a probe Worker behind a proxied `kflare-probe-*` hostname. A request carrying
+  a Log4j string in a header or the query got Cloudflare's 403 block page while the phase had no entry point. It got
+  through (200) about 10 seconds after an entry point appeared holding only an unrelated skip rule, and still got
+  through once that rule was deleted and the entry point was empty. It was blocked again once an explicit `execute`
+  rule deployed the Free Managed Ruleset, and blocked again by default about 5 seconds after the emptied entry point
+  was deleted (DELETE `/rulesets/{id}`, 204). The probe objects were deleted and the zone left as found
+- The Free Managed Ruleset (`77454fe2d30c4220b5701f6fdfb893ba`, version 74 on 2026-10-14) holds 31 rules, all `block`,
+  tagged with categories such as `wordpress`, `log4j` and CVE IDs
+- An execute rule comes back as sent plus `action_parameters.version: "latest"`. An explicit `"latest"` is accepted;
+  any other version is refused ("version pinning cannot be used", 20055). Overrides come back exactly as sent, in the
+  order sent
+- Dry runs on Free: overrides for the whole ruleset (`enabled`; `action` `block`, `challenge`, `js_challenge`,
+  `managed_challenge` or `log`), per category and per rule are accepted. Refused: `skip` as an override action
+  (20067); an override without `enabled` or `action` (20063); an unknown category (20235) or rule (20233); a category
+  or rule listed twice (20236, 20234); `sensitivity_level` on the whole ruleset (20069). `score_threshold` on a rule is
+  accepted but only means something in the OWASP Core Ruleset, so kflare does not expose it yet
+- Also refused: payload logging (`matched_data`) and the paid rulesets ("not entitled"), an unknown ruleset (20226),
+  `logging` on an execute rule (20018), the `block` action in this phase (20016), and a second execute rule for a
+  ruleset the zone already deploys (20014, "more than one rule is trying to execute the same managed ruleset")
+- Exceptions: Free accepts skip rules here with `rulesets`, `rules`, `ruleset: current` and `phases`
+- deploy.md documents Zone · Zone WAF · Edit. The dev token writes the phase through its account-level permissions, so
+  a token holding only Zone WAF has not been run against it (ask before creating one)
 
 
 #### Branch: `feat/managed-transform-controller`
@@ -965,8 +1015,8 @@ Each is the foundation plus typed action parameters. Together they replace Page 
 
 
 #### Code generator (`kflare-gen`)
-**Depends on:** `feat/shared-client`, `feat/rulesets-foundation`; eight PRs, in order, after `ManagedRuleset`
-**Status:** 🔲 Not started. Planned and decided 2026-10-13
+**Depends on:** `feat/shared-client`, `feat/rulesets-foundation`; eight PRs, in order
+**Status:** 🔲 Next. Planned and decided 2026-10-13
 
 Most of a new kind is the same wiring every time. IPList (#26) changed 27 files (+2,596 lines). Besides its types and
 its bulk-operation logic, it repeated `Get/SetConditions`, registration in `cmd/main.go`, the CRD kustomization, the
@@ -980,7 +1030,7 @@ part from Cloudflare's own description of its API. What Cloudflare does not desc
    them only. v0.119 is hand-written, with no machine-readable list of its resources and operations to generate from
 2. Fields are **opt-out**: a generated kind has every field v7 exposes for it, minus those its entry ignores. The
    output is committed, so each field an SDK bump adds shows up in review
-3. `ManagedRuleset` is built by hand next, as planned; `feat/rulesets-v7` moves its conversion to v7 later
+3. `ManagedRuleset` is built by hand first, as planned (✅); `feat/rulesets-v7` moves its conversion to v7 later
 4. The first new kind generated end to end is a free, account-level resource: a D1 database or a Turnstile widget,
    picked when that PR starts, after checking the Free-plan limits and the token permission
 
@@ -1218,9 +1268,9 @@ export CF_E2E_ZONE=kflare.dev               # zone for the DNS e2e specs; adopte
 
 ## Current Status
 
-> **Phases 1 and 2 complete. Phase 3 in progress: `KVNamespace`, `R2Bucket`, `WAFCustomRule`, `RateLimitRule` and
-> `IPList` done.** cloudflare-go is at v0.119; rule kinds share the Rulesets foundation and controller. Next:
-> `ManagedRuleset`, by hand, since Zero Trust still waits on account setup; then the code generator, `kflare-gen`
-> (see Phase 3). Items needing a paid plan, add-on or account setup are tracked under "Deferred: paid plan, add-on
-> or account setup" in Phase 3.
+> **Phases 1 and 2 complete. Phase 3 in progress: `KVNamespace`, `R2Bucket`, `WAFCustomRule`, `RateLimitRule`,
+> `IPList` and `ManagedRuleset` done.** cloudflare-go is at v0.119; rule kinds share the Rulesets foundation and
+> controller. Next: the code generator, `kflare-gen`, starting with `feat/cloudflare-go-v7` (see Phase 3); Zero Trust
+> still waits on account setup. Items needing a paid plan, add-on or account setup are tracked under "Deferred: paid
+> plan, add-on or account setup" in Phase 3.
 > Last updated: October 2026

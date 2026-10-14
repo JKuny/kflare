@@ -43,6 +43,10 @@ const (
 //   - Every write bumps the ruleset's version and returns the whole ruleset.
 //   - An unknown ruleset is a 404 (code 10001), an unknown rule a 404 (code
 //     10002). Deleting the last rule leaves the entry point, without rules.
+//
+// And on 2026-10-14, for execute rules: an execute rule runs the managed
+// ruleset's latest version unless told otherwise, a zone executes a managed
+// ruleset at most once (400, code 20014), and deleting a ruleset removes it.
 type fakeRulesetAPI struct {
 	rulesets map[string]*cf.Ruleset // entry points, by phase
 	maxRules int
@@ -99,7 +103,24 @@ func (f *fakeRulesetAPI) stored(rule cf.RulesetRule, id string, version int) cf.
 	if rule.Action == "skip" && rule.Logging == nil {
 		rule.Logging = &cf.RulesetRuleLogging{Enabled: cf.BoolPtr(true)}
 	}
+	if rule.Action == "execute" && rule.ActionParameters != nil && rule.ActionParameters.Version == nil {
+		params := *rule.ActionParameters
+		params.Version = cf.StringPtr("latest")
+		rule.ActionParameters = &params
+	}
 	return rule
+}
+
+// executesTwice reports whether rule executes a managed ruleset that a rule
+// in rules other than the one with exceptID already executes.
+func executesTwice(rules []cf.RulesetRule, rule cf.RulesetRule, exceptID string) bool {
+	if rule.Action != "execute" || rule.ActionParameters == nil {
+		return false
+	}
+	return slices.ContainsFunc(rules, func(other cf.RulesetRule) bool {
+		return other.ID != exceptID && other.Action == "execute" && other.ActionParameters != nil &&
+			other.ActionParameters.ID == rule.ActionParameters.ID
+	})
 }
 
 // bump records a change to rs, which Cloudflare answers with the whole
@@ -158,6 +179,9 @@ func (f *fakeRulesetAPI) CreateRuleset(
 		if _, taken := ruleWithRef(rs.Rules, rule.Ref); taken {
 			return cf.Ruleset{}, cloudflareError(400, 20023)
 		}
+		if executesTwice(rs.Rules, rule, "") {
+			return cf.Ruleset{}, cloudflareError(400, managedRulesetConflictCode)
+		}
 		rs.Rules = append(rs.Rules, f.stored(rule, f.newID(), 1))
 	}
 	f.rulesets[params.Phase] = rs
@@ -181,6 +205,9 @@ func (f *fakeRulesetAPI) CreateRulesetRule(
 	}
 	if len(rs.Rules) >= f.maxRules {
 		return cf.Ruleset{}, cloudflareError(400, 50001)
+	}
+	if executesTwice(rs.Rules, rule, "") {
+		return cf.Ruleset{}, cloudflareError(400, managedRulesetConflictCode)
 	}
 	index, err := insertionIndex(rs.Rules, position)
 	if err != nil {
@@ -208,6 +235,9 @@ func (f *fakeRulesetAPI) UpdateRulesetRule(
 	old := rs.Rules[i]
 	if rule.Ref != "" && rule.Ref != old.Ref {
 		return cf.Ruleset{}, cloudflareError(400, 20023)
+	}
+	if executesTwice(rs.Rules, rule, ruleID) {
+		return cf.Ruleset{}, cloudflareError(400, managedRulesetConflictCode)
 	}
 	rule.Ref = old.Ref
 	version, _ := strconv.Atoi(*old.Version)
@@ -260,6 +290,20 @@ func (f *fakeRulesetAPI) DeleteRulesetRule(
 	return f.bump(rs), nil
 }
 
+func (f *fakeRulesetAPI) DeleteRuleset(_ context.Context, rc *cf.ResourceContainer, rulesetID string) error {
+	if err := f.start("DeleteRuleset", rc); err != nil {
+		return err
+	}
+	for phase, rs := range f.rulesets {
+		if rs.ID == rulesetID {
+			delete(f.rulesets, phase)
+			f.writes++
+			return nil
+		}
+	}
+	return cloudflareError(404, 10001)
+}
+
 // insertionIndex is where a rule placed at position goes in rules: the end
 // without a position, or next to the one rule the position names.
 func insertionIndex(rules []cf.RulesetRule, position *cfpkg.RulesetRulePosition) (int, error) {
@@ -303,16 +347,38 @@ func (f *fakeRulesetAPI) entrypointIn(phase string) *cf.Ruleset {
 // seed gives the zone an entry point in the test phase holding rules, as if
 // they had been created through the API.
 func (f *fakeRulesetAPI) seed(rules ...cf.RulesetRule) {
-	rs := &cf.Ruleset{ID: f.newID(), Name: "default", Kind: "zone", Phase: rulesTestPhase}
+	f.seedIn(rulesTestPhase, rules...)
+}
+
+// seedIn gives the zone an entry point for phase holding rules, as if
+// written outside kflare.
+func (f *fakeRulesetAPI) seedIn(phase string, rules ...cf.RulesetRule) {
+	rs := &cf.Ruleset{ID: f.newID(), Name: "default", Kind: "zone", Phase: phase}
 	for _, rule := range rules {
 		rs.Rules = append(rs.Rules, f.stored(rule, f.newID(), 1))
 	}
-	f.rulesets[rulesTestPhase] = rs
+	f.rulesets[phase] = rs
 	f.bump(rs)
 }
 
 // blockRule is a rule as a kflare controller would ask for it: every field it
 // wants set, Cloudflare's defaults left out.
+// managedPhase is the phase whose emptied entry point kflare deletes.
+const managedPhase = "http_request_firewall_managed"
+
+// freeManagedRulesetID is the Cloudflare Free Managed Ruleset.
+const freeManagedRulesetID = "77454fe2d30c4220b5701f6fdfb893ba"
+
+// executeRule deploys the managed ruleset rulesetID to every request.
+func executeRule(ref, rulesetID string) cf.RulesetRule {
+	return cf.RulesetRule{
+		Ref:              ref,
+		Action:           "execute",
+		ActionParameters: &cf.RulesetRuleActionParameters{ID: rulesetID},
+		Expression:       "true",
+	}
+}
+
 func blockRule(ref, path string) cf.RulesetRule {
 	return cf.RulesetRule{
 		Ref:         ref,
@@ -413,6 +479,21 @@ var _ = Describe("Ruleset rules", func() {
 			Expect(second).To(Equal(rulesetRuleState{rulesetID: first.rulesetID, ruleID: first.ruleID, version: "1"}))
 			Expect(api.writes).To(Equal(writes))
 			Expect(*api.entrypoint().Version).To(Equal(version))
+		})
+
+		It("counts the latest version, which Cloudflare records for an execute rule, as set", func() {
+			deploy := executeRule("kflare-managed", freeManagedRulesetID)
+			_, err := syncRulesetRule(ctx, api, rulesTestZone, managedPhase, deploy, nil)
+			Expect(err).NotTo(HaveOccurred())
+			stored := api.entrypointIn(managedPhase).Rules[0]
+			Expect(*stored.ActionParameters.Version).To(Equal("latest"))
+			Expect(deploy.ActionParameters.Version).To(BeNil(), "the comparison must not change the caller's rule")
+			writes := api.writes
+
+			state, err := syncRulesetRule(ctx, api, rulesTestZone, managedPhase, deploy, nil)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(state.wrote).To(BeFalse())
+			Expect(api.writes).To(Equal(writes))
 		})
 
 		It("rewrites a rule changed outside kflare, keeping its ID and place", func() {
@@ -608,7 +689,14 @@ var _ = Describe("Ruleset rules", func() {
 
 	Describe("deleting a rule", func() {
 		del := func(ref string) error {
-			return deleteRulesetRule(ctx, api, rulesTestZone, rulesTestPhase, ref)
+			return deleteRulesetRule(ctx, api, rulesTestZone, rulesTestPhase, ref, false)
+		}
+		delManaged := func(ref string, peersRemain bool) error {
+			return deleteRulesetRule(ctx, api, rulesTestZone, managedPhase, ref, peersRemain)
+		}
+		hasEntrypoint := func(phase string) bool {
+			_, ok := api.rulesets[phase]
+			return ok
 		}
 
 		It("deletes the rule with its ref and leaves the others", func() {
@@ -647,6 +735,82 @@ var _ = Describe("Ruleset rules", func() {
 			api.seed(blockRule("kflare-a", "/a"))
 			api.errs["DeleteRulesetRule"] = cloudflareError(400, 0)
 			Expect(cfpkg.IsTerminalError(del("kflare-a"))).To(BeTrue())
+		})
+
+		Describe("in a phase whose emptied entry point kflare deletes", func() {
+			It("deletes the entry point it empties, which brings back Cloudflare's default deployment", func() {
+				api.seedIn(managedPhase, executeRule("kflare-a", freeManagedRulesetID))
+				Expect(delManaged("kflare-a", false)).To(Succeed())
+				Expect(hasEntrypoint(managedPhase)).To(BeFalse())
+			})
+
+			It("deletes an entry point left empty even when the rule had gone already", func() {
+				api.seedIn(managedPhase)
+				Expect(delManaged("kflare-a", false)).To(Succeed())
+				Expect(hasEntrypoint(managedPhase)).To(BeFalse())
+			})
+
+			It("keeps the emptied entry point while other kflare resources are about to write to it", func() {
+				api.seedIn(managedPhase, executeRule("kflare-a", freeManagedRulesetID))
+				Expect(delManaged("kflare-a", true)).To(Succeed())
+				Expect(api.entrypointIn(managedPhase).Rules).To(BeEmpty())
+			})
+
+			It("keeps the entry point while it holds other rules", func() {
+				api.seedIn(managedPhase, executeRule("someone-else", freeManagedRulesetID),
+					executeRule("kflare-a", "efb7b8c949ac4650a09736fc376e9aee"))
+				Expect(delManaged("kflare-a", false)).To(Succeed())
+				Expect(refs(api.entrypointIn(managedPhase).Rules)).To(Equal([]string{"someone-else"}))
+			})
+
+			It("reads the entry point again when the rule went meanwhile", func() {
+				api.seedIn(managedPhase, executeRule("kflare-a", freeManagedRulesetID))
+				api.before = func(method string) {
+					if method == "DeleteRulesetRule" {
+						api.entrypointIn(managedPhase).Rules = nil
+					}
+				}
+				Expect(delManaged("kflare-a", false)).To(Succeed())
+				Expect(hasEntrypoint(managedPhase)).To(BeFalse())
+			})
+
+			It("counts an entry point deleted meanwhile as deleted", func() {
+				api.seedIn(managedPhase, executeRule("kflare-a", freeManagedRulesetID))
+				api.before = func(method string) {
+					if method == "DeleteRulesetRule" {
+						delete(api.rulesets, managedPhase)
+					}
+				}
+				Expect(delManaged("kflare-a", false)).To(Succeed())
+				Expect(hasEntrypoint(managedPhase)).To(BeFalse())
+
+				api.before = nil
+				api.seedIn(managedPhase)
+				api.errs["DeleteRuleset"] = cloudflareError(404, 10001)
+				Expect(delManaged("kflare-a", false)).To(Succeed())
+			})
+
+			It("reports errors reading the entry point again or deleting it", func() {
+				api.seedIn(managedPhase, executeRule("kflare-a", freeManagedRulesetID))
+				api.before = func(method string) {
+					if method == "DeleteRulesetRule" {
+						api.entrypointIn(managedPhase).Rules = nil
+						api.errs["GetEntrypointRuleset"] = forbidden()
+					}
+				}
+				Expect(cfpkg.IsTerminalError(delManaged("kflare-a", false))).To(BeTrue())
+
+				api.before, api.errs["GetEntrypointRuleset"] = nil, nil
+				api.errs["DeleteRuleset"] = forbidden()
+				Expect(cfpkg.IsTerminalError(delManaged("kflare-a", false))).To(BeTrue())
+				Expect(hasEntrypoint(managedPhase)).To(BeTrue())
+			})
+
+			It("leaves the entry points of other phases in place", func() {
+				api.seed(blockRule("kflare-a", "/a"))
+				Expect(del("kflare-a")).To(Succeed())
+				Expect(hasEntrypoint(rulesTestPhase)).To(BeTrue())
+			})
 		})
 	})
 

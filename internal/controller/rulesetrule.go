@@ -38,6 +38,9 @@ import (
 //   - kflare keeps the rules it manages in a zone and phase in priority
 //     order, moving them with position-only updates. Rules created outside
 //     kflare keep their place.
+//   - An emptied entry point stays, except in the phases where an entry point
+//     changes what Cloudflare runs even without rules
+//     (emptiedEntrypointPhases).
 
 // rulesetEntrypointExistsCode is the Cloudflare error code (with HTTP 400)
 // for creating a zone entry point ruleset in a phase that already has one.
@@ -47,6 +50,20 @@ const rulesetEntrypointExistsCode = 20217
 // Cloudflare requires a name; the phase, not the name, identifies the entry
 // point.
 const entrypointRulesetName = "default"
+
+// managedRulesetLatestVersion is the version Cloudflare records for an
+// execute rule that names none: the managed ruleset's latest.
+const managedRulesetLatestVersion = "latest"
+
+// emptiedEntrypointPhases are the phases where a zone's entry point changes
+// what Cloudflare runs even when it holds no rules, so kflare deletes the
+// entry point once deleting a rule has emptied it. In
+// http_request_firewall_managed, any entry point stops the managed rulesets
+// Cloudflare deploys by default, such as the Free Managed Ruleset on Free
+// zones, and deleting it brings them back (both verified live, 2026-10-14).
+var emptiedEntrypointPhases = map[string]bool{
+	string(cf.RulesetPhaseHTTPRequestFirewallManaged): true,
+}
 
 // RulesetRuleAPI is the part of the Cloudflare API that rule controllers use.
 // The rule calls are kflare's own (pkg/cloudflare/rulesets.go): cloudflare-go
@@ -66,6 +83,7 @@ type RulesetRuleAPI interface {
 		ctx context.Context, rc *cf.ResourceContainer, rulesetID, ruleID string, position cfpkg.RulesetRulePosition,
 	) (cf.Ruleset, error)
 	DeleteRulesetRule(ctx context.Context, rc *cf.ResourceContainer, rulesetID, ruleID string) (cf.Ruleset, error)
+	DeleteRuleset(ctx context.Context, rc *cf.ResourceContainer, rulesetID string) error
 }
 
 var _ RulesetRuleAPI = (*cfpkg.Client)(nil)
@@ -275,7 +293,11 @@ func orderRulesetRules(
 // ruleset for phase. A missing entry point or rule counts as removed. The
 // entry point stays even when the rule was its last: Cloudflare keeps an
 // emptied entry point, and kflare may not be its only user.
-func deleteRulesetRule(ctx context.Context, api RulesetRuleAPI, zoneID, phase, ref string) error {
+//
+// In the phases of emptiedEntrypointPhases, an entry point left without rules
+// is deleted, which restores what Cloudflare runs without one, unless
+// peersRemain: another kflare resource is about to write its rule to it.
+func deleteRulesetRule(ctx context.Context, api RulesetRuleAPI, zoneID, phase, ref string, peersRemain bool) error {
 	rc := cf.ZoneIdentifier(zoneID)
 	ruleset, err := api.GetEntrypointRuleset(ctx, rc, phase)
 	if cfpkg.IsNotFound(err) {
@@ -284,11 +306,29 @@ func deleteRulesetRule(ctx context.Context, api RulesetRuleAPI, zoneID, phase, r
 	if err != nil {
 		return err
 	}
-	rule, found := ruleWithRef(ruleset.Rules, ref)
-	if !found {
+	if rule, found := ruleWithRef(ruleset.Rules, ref); found {
+		updated, err := api.DeleteRulesetRule(ctx, rc, ruleset.ID, rule.ID)
+		switch {
+		case cfpkg.IsNotFound(err):
+			// The rule, or the whole entry point, went meanwhile. Read the
+			// entry point again to see whether it is empty.
+			ruleset, err = api.GetEntrypointRuleset(ctx, rc, phase)
+			if cfpkg.IsNotFound(err) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+		case err != nil:
+			return err
+		default:
+			ruleset = updated
+		}
+	}
+	if !emptiedEntrypointPhases[phase] || peersRemain || len(ruleset.Rules) > 0 {
 		return nil
 	}
-	if _, err := api.DeleteRulesetRule(ctx, rc, ruleset.ID, rule.ID); err != nil && !cfpkg.IsNotFound(err) {
+	if err := api.DeleteRuleset(ctx, rc, ruleset.ID); err != nil && !cfpkg.IsNotFound(err) {
 		return err
 	}
 	return nil
@@ -313,7 +353,8 @@ func ruleIndex(rules []cf.RulesetRule, id string) int {
 // it, already is desired. It compares the definitions only, not the fields
 // Cloudflare sets (the ID, version and time of the last update), and counts
 // what Cloudflare fills in by itself as set (verified live): a rule is
-// enabled unless told otherwise, and a skip rule logs its matches.
+// enabled unless told otherwise, a skip rule logs its matches, and an execute
+// rule runs the managed ruleset's latest version.
 func rulesetRuleMatches(desired, actual cf.RulesetRule) bool {
 	want, err := comparableRule(desired)
 	if err != nil {
@@ -337,6 +378,12 @@ func comparableRule(rule cf.RulesetRule) (any, error) {
 	}
 	if rule.Action == string(cf.RulesetRuleActionSkip) && rule.Logging == nil {
 		rule.Logging = &cf.RulesetRuleLogging{Enabled: cf.BoolPtr(true)}
+	}
+	if rule.Action == string(cf.RulesetRuleActionExecute) && rule.ActionParameters != nil &&
+		rule.ActionParameters.Version == nil {
+		params := *rule.ActionParameters
+		params.Version = cf.StringPtr(managedRulesetLatestVersion)
+		rule.ActionParameters = &params
 	}
 	raw, err := json.Marshal(rule)
 	if err != nil {
