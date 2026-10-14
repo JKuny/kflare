@@ -13,7 +13,8 @@ Secret (API token)
        │    ├─ DNSRecord (same namespace, via zoneRef)
        │    ├─ WorkerRoute (same namespace, via zoneRef; runs a WorkerScript)
        │    ├─ WAFCustomRule (same namespace, via zoneRef)
-       │    └─ RateLimitRule (same namespace, via zoneRef)
+       │    ├─ RateLimitRule (same namespace, via zoneRef)
+       │    └─ ManagedRuleset (same namespace, via zoneRef)
        ├─ Tunnel (namespaced)
        │    └─ TunnelConfiguration (same namespace, via tunnelRef)
        ├─ WorkerScript (namespaced; binds KVNamespaces via kvNamespaceRef, R2Buckets via r2BucketRef)
@@ -44,8 +45,8 @@ Every controller follows the same shape:
 6. Record IDs and metadata in status and set `Ready=True`.
 
 Step 5 is deliberate: an idle reconcile makes read calls only. The live e2e suite checks this for DNSRecord,
-WAFCustomRule and RateLimitRule, and TunnelConfiguration's comparison ignores fields Cloudflare adds on its own so an
-unchanged config does not bump its version.
+WAFCustomRule, RateLimitRule, ManagedRuleset and IPList, and TunnelConfiguration's comparison ignores fields Cloudflare
+adds on its own so an unchanged config does not bump its version.
 
 ## When drift is detected
 
@@ -82,7 +83,7 @@ What each controller compares when it does reconcile:
 | `IPList` | Description, updated in place, and items, compared as a set in canonical form (Cloudflare stores 203.0.113.7/32 as 203.0.113.7, IPv6 in lowercase and compressed) and replaced as a whole. Cloudflare applies a replace in the background: the IPList reports `ReplacingItems` and checks every 2 seconds until it is done. Recreated if deleted externally |
 | `R2Bucket` | Existence only: recreated, empty, if deleted externally. Its name cannot change and its location is fixed at creation. Workers bind a bucket by name, so they keep working with the recreated bucket without a re-upload (verified live) |
 | `WorkerRoute` | Pattern and the Worker it runs; recreated if deleted externally, including when Cloudflare deletes it together with its Worker |
-| `WAFCustomRule`, `RateLimitRule` | The rule's whole definition: expression, action and its parameters, enabled, description, and for a rate limiting rule how it counts (characteristics, period, requests per period, mitigation timeout, counting expression, origin requests only). Also its place among kflare's rules in the zone and phase (see [Rules](#rules)). Recreated if deleted externally |
+| `WAFCustomRule`, `RateLimitRule`, `ManagedRuleset` | The rule's whole definition: expression, action and its parameters, enabled, description, for a rate limiting rule how it counts (characteristics, period, requests per period, mitigation timeout, counting expression, origin requests only), and for a managed ruleset deployment the ruleset and its overrides. Also its place among kflare's rules in the zone and phase (see [Rules](#rules)). Recreated if deleted externally |
 
 ## Adoption and ownership
 
@@ -105,7 +106,7 @@ retain policy first (see [Deletion](#deletion)).
 | `IPList` | The IP list named `spec.name` in the account (names are unique per account, across list kinds) unless another IPList manages it, or the name belongs to a list of another kind: either way it reports `NameConflict` and retries every minute. |
 | `R2Bucket` | The bucket named `spec.name` in the account's default jurisdiction (names are unique per account) unless another R2Bucket for the same Cloudflare account manages it, in which case it reports `NameConflict` and retries every minute. An adopted bucket keeps its location; `spec.locationHint` only applies when kflare creates the bucket. |
 | `WorkerRoute` | The route with the same pattern in the zone (patterns are unique per zone) unless another WorkerRoute manages it, in which case the WorkerRoute reports `PatternConflict` and retries every minute. |
-| `WAFCustomRule`, `RateLimitRule` | Nothing. A rule is kflare's only if it carries the ref kflare derives for the resource (see [Rules](#rules)); rules created outside kflare are never touched. |
+| `WAFCustomRule`, `RateLimitRule`, `ManagedRuleset` | Nothing. A rule is kflare's only if it carries the ref kflare derives for the resource (see [Rules](#rules)); rules created outside kflare are never touched. A zone deploys a managed ruleset at most once, so while a rule kflare does not manage deploys it, the ManagedRuleset reports `RulesetConflict` and checks again every minute. |
 
 ### DNSRecord, WorkerRoute, KVNamespace, IPList and R2Bucket ownership
 
@@ -128,9 +129,10 @@ with a TXT ownership registry; kflare currently does not.
 ### Rules
 
 Each rule kind manages one rule per resource in its zone's entry point ruleset for one Rulesets API phase:
-`WAFCustomRule` in `http_request_firewall_custom`, the zone's WAF custom rules, and `RateLimitRule` in
-`http_ratelimit`, its rate limiting rules. The managed ruleset and Rules kinds planned next work the same way
-(`internal/controller/rulesetrule.go`, `rulesetrule_controller.go`). A zone has one entry point per phase, shared by
+`WAFCustomRule` in `http_request_firewall_custom`, the zone's WAF custom rules, `RateLimitRule` in `http_ratelimit`,
+its rate limiting rules, and `ManagedRuleset` in `http_request_firewall_managed`, where an `execute` rule deploys a
+managed ruleset. The Rules kinds planned next work the same way (`internal/controller/rulesetrule.go`,
+`rulesetrule_controller.go`). A zone has one entry point per phase, shared by
 every rule in that phase, kflare's or not, so kflare:
 
 - Marks each rule it manages with a ref, `kflare-` and the first 32 hex characters of the SHA-256 of
@@ -145,10 +147,30 @@ every rule in that phase, kflare's or not, so kflare:
   their place. Reordering moves rules without changing them: Cloudflare keeps a moved rule's definition and version
   (verified live). A reconcile that moved rules checks the order again 10 seconds later, in case another resource was
   reordering the same rules at the same time.
-- Leaves the entry point in place when its last rule is deleted, as Cloudflare does.
+- Leaves the entry point in place when its last rule is deleted, as Cloudflare does, except in the managed phase (see
+  below).
 - Writes a rule that uses a custom list (`$name`, managed by an `IPList`) once the list exists. Cloudflare refuses the
   rule until then (400, code 20127), a terminal error; every IPList change re-triggers the rules whose expression names
   the list, so a rule and its list can be applied together.
+
+#### Managed rulesets
+
+Cloudflare deploys its Free Managed Ruleset to Free zones by default, but only while the zone has **no entry point** in
+`http_request_firewall_managed`. Any entry point there, even one holding only an unrelated exception, or none at all,
+replaces that default with what its rules deploy: the ruleset stops running within seconds, and comes back within
+seconds once the entry point is deleted (verified live on `kflare.dev`, with a request carrying a Log4j string). So:
+
+- A ManagedRuleset deploys its ruleset explicitly, which keeps it running on a zone that had it by default. To turn it
+  off, keep the ManagedRuleset and set `enabled: false`, or override the rules' `enabled` or `action`.
+- When deleting a ManagedRuleset leaves the phase's entry point without rules, kflare deletes the entry point, which
+  hands the zone back to Cloudflare's default. It keeps an emptied entry point while another kflare rule in the phase
+  is about to be written to it, and every deletion re-triggers the zone's other ManagedRulesets, so one whose rule was
+  written in the moment before the entry point went writes it again.
+- A zone deploys a managed ruleset at most once (400, code 20014). A ManagedRuleset whose ruleset another rule already
+  deploys reports `RulesetConflict` and checks again every minute, or as soon as another ManagedRuleset goes, so that a
+  ManagedRuleset replaced by one with another name hands over within seconds.
+- Cloudflare runs the ruleset's latest version and refuses any other (code 20055). It keeps overrides in the order
+  sent, so kflare sorts categories and rules: reordering them in the spec writes nothing.
 
 ## Error handling
 
@@ -165,12 +187,13 @@ cloudflare-go names its 401 error `AuthorizationError` and its 403 error `Authen
 names suggest; `pkg/cloudflare/errors.go` documents the mapping.
 
 The Rulesets API reports what the zone's plan does not allow (a regular expression, the Log action, a custom block
-response in a WAF custom rule, a rate limiting period other than 10 seconds, more rules than the plan allows) as a
-400, often without an error code. These are terminal like any other 4xx, and the condition carries Cloudflare's
-message.
+response in a WAF custom rule, a rate limiting period other than 10 seconds, a paid managed ruleset, more rules than the
+plan allows) as a 400, often without an error code. These are terminal like any other 4xx, and the condition carries
+Cloudflare's message.
 
 Failures caused by something a resource does not watch, such as a missing account or token Secret, retry every minute
-with reason `AccountNotFound`, `AccountNotReady`, `SecretNotFound` or `TokenKeyMissing`. Terminal errors are also
+with reason `AccountNotFound`, `AccountNotReady`, `SecretNotFound` or `TokenKeyMissing`. So does a managed ruleset that
+another rule already deploys, with reason `RulesetConflict`. Terminal errors are also
 retried by the 10-hour resync.
 
 ## Deletion
@@ -196,6 +219,8 @@ Per-resource details:
   you need to keep.
 - **WAFCustomRule** and **RateLimitRule** deletion deletes the resource's rule, found by its ref. The zone's other
   rules and its entry point stay.
+- **ManagedRuleset** deletion deletes its `execute` rule, and with it the phase's entry point once no rule is left in
+  it, which brings back Cloudflare's default deployment (see [Managed rulesets](#managed-rulesets)).
 - **IPList** deletion deletes the list. Cloudflare refuses while a rule uses it (400, code 10041): the IPList keeps its
   finalizer and reports `ListInUse`, checking again every minute, and straight away when a kflare rule that uses it is
   deleted. A rule created outside kflare holds it until that rule changes or the retain policy is set.
@@ -210,7 +235,7 @@ resource that still needs its parent for its own cleanup. Parents therefore keep
 
 - A `CloudflareAccount` waits for the Zones, Tunnels, WorkerScripts, KVNamespaces, R2Buckets and IPLists that reference
   it.
-- A `Zone` waits for its DNSRecords, WorkerRoutes, WAFCustomRules and RateLimitRules.
+- A `Zone` waits for its DNSRecords, WorkerRoutes, WAFCustomRules, RateLimitRules and ManagedRulesets.
 - A `Tunnel` waits for its TunnelConfigurations.
 - A `KVNamespace` waits for the WorkerScripts bound to it through `kvNamespaceRef`. Cloudflare deletes a namespace a
   Worker is bound to, but every later upload of that Worker then fails.
@@ -221,7 +246,7 @@ resource that still needs its parent for its own cleanup. Parents therefore keep
 Each child therefore cleans up with its own deletion policy even when its parent is retained. The live e2e suite deletes
 everything in one pass and checks Cloudflare afterwards.
 
-A DNSRecord, WorkerRoute, WAFCustomRule, RateLimitRule or TunnelConfiguration whose parent is nevertheless gone (its
+A DNSRecord, WorkerRoute, rule or TunnelConfiguration whose parent is nevertheless gone (its
 finalizer was removed by hand) cannot resolve credentials. It skips the Cloudflare call so its own deletion does not
 hang, and leaves its Cloudflare object in place.
 
