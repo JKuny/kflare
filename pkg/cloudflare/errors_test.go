@@ -7,13 +7,69 @@ SPDX-License-Identifier: MIT
 package cloudflare_test
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	cf "github.com/cloudflare/cloudflare-go"
+	"github.com/cloudflare/cloudflare-go/v7/kv"
+	"github.com/cloudflare/cloudflare-go/v7/option"
 
 	cfpkg "github.com/JonathanGraniero/kflare/pkg/cloudflare"
 )
+
+// getV7Namespace makes one cloudflare-go v7 call against baseURL, without
+// retries, and returns its error.
+func getV7Namespace(baseURL string) error {
+	var params kv.NamespaceGetParams
+	params.AccountID.Value, params.AccountID.Present = "account-id", true
+	_, err := kv.NewNamespaceService(option.WithBaseURL(baseURL), option.WithMaxRetries(0)).
+		Get(context.Background(), "ns-id", params)
+	return err
+}
+
+// v7Error returns the error cloudflare-go v7 returns when Cloudflare answers
+// with status and these error codes.
+func v7Error(t *testing.T, status int, codes ...int) error {
+	t.Helper()
+	errs := make([]map[string]any, 0, len(codes))
+	for _, code := range codes {
+		errs = append(errs, map[string]any{"code": code, "message": "rejected"})
+	}
+	body := mustJSON(t, map[string]any{"result": nil, "success": false, "errors": errs, "messages": []any{}})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
+	}))
+	defer server.Close()
+
+	err := getV7Namespace(server.URL)
+	var apiErr *kv.Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != status {
+		t.Fatalf("v7 returned %v, want a *cloudflare.Error with status %d", err, status)
+	}
+	return err
+}
+
+// v7ConnectionError returns the error cloudflare-go v7 returns when nothing
+// answers.
+func v7ConnectionError(t *testing.T) error {
+	t.Helper()
+	server := httptest.NewServer(http.NotFoundHandler())
+	server.Close()
+
+	err := getV7Namespace(server.URL)
+	var apiErr *kv.Error
+	if err == nil || errors.As(err, &apiErr) {
+		t.Fatalf("v7 returned %v, want a connection error", err)
+	}
+	return err
+}
 
 // ptrAuthN returns a *cf.AuthenticationError as an error, matching what the
 // cloudflare-go HTTP layer returns for HTTP 403 responses.
@@ -113,6 +169,16 @@ func TestIsTerminalError(t *testing.T) {
 			err:      errors.Join(errors.New("outer"), ptrRequest(&cf.Error{StatusCode: 422, Type: cf.ErrorTypeRequest})),
 			terminal: true,
 		},
+		// cloudflare-go v7 returns a *cloudflare.Error for every error status.
+		{name: "v7 401 is terminal", err: v7Error(t, 401, 10000), terminal: true},
+		{name: "v7 403 is terminal", err: v7Error(t, 403, 10000), terminal: true},
+		{name: "v7 404 is terminal", err: v7Error(t, 404, 10013), terminal: true},
+		{name: "v7 400 is terminal", err: v7Error(t, 400, 10014), terminal: true},
+		{name: "v7 409 is terminal", err: v7Error(t, 409, 10008), terminal: true},
+		{name: "v7 429 is NOT terminal (retryable)", err: v7Error(t, 429), terminal: false},
+		{name: "v7 500 is NOT terminal (retryable)", err: v7Error(t, 500), terminal: false},
+		{name: "v7 connection error is NOT terminal (retryable)", err: v7ConnectionError(t), terminal: false},
+		{name: "wrapped v7 403 is terminal", err: fmt.Errorf("outer: %w", v7Error(t, 403)), terminal: true},
 	}
 
 	for _, tc := range tests {
@@ -136,6 +202,10 @@ func TestIsNotFound(t *testing.T) {
 		{"AuthenticationError", ptrAuthN(&cf.Error{StatusCode: 403, Type: cf.ErrorTypeAuthentication}), false},
 		{"RequestError", ptrRequest(&cf.Error{StatusCode: 400, Type: cf.ErrorTypeRequest}), false},
 		{"plain error", errors.New("not found"), false},
+		{"v7 404", v7Error(t, 404, 10013), true},
+		{"wrapped v7 404", fmt.Errorf("outer: %w", v7Error(t, 404, 10013)), true},
+		{"v7 403", v7Error(t, 403, 10000), false},
+		{"v7 400", v7Error(t, 400, 10014), false},
 	}
 
 	for _, tc := range tests {
@@ -159,6 +229,9 @@ func TestIsRateLimit(t *testing.T) {
 		{"AuthenticationError", ptrAuthN(&cf.Error{StatusCode: 403, Type: cf.ErrorTypeAuthentication}), false},
 		{"ServiceError", ptrService(&cf.Error{StatusCode: 500, Type: cf.ErrorTypeService}), false},
 		{"plain error", errors.New("too many requests"), false},
+		{"v7 429", v7Error(t, 429), true},
+		{"v7 403", v7Error(t, 403, 10000), false},
+		{"v7 503", v7Error(t, 503), false},
 	}
 
 	for _, tc := range tests {
@@ -188,6 +261,15 @@ func TestHasErrorCode(t *testing.T) {
 		{"RequestError without codes", ptrRequest(&cf.Error{StatusCode: 400}), false},
 		{"NotFoundError with the code", ptrNotFound(&cf.Error{StatusCode: 404, ErrorCodes: []int{10008}}), false},
 		{"plain error", errors.New("code 10008"), false},
+		{"v7 409 with the code", v7Error(t, 409, 10008), true},
+		{"wrapped v7 409 with the code", errors.Join(errors.New("outer"), v7Error(t, 409, 10008)), true},
+		{"v7 400 with the code among others", v7Error(t, 400, 10005, 10008), true},
+		{"v7 400 with another code", v7Error(t, 400, 10005), false},
+		{"v7 400 without codes", v7Error(t, 400), false},
+		{"v7 403 with the code", v7Error(t, 403, 10008), false},
+		{"v7 404 with the code", v7Error(t, 404, 10008), false},
+		{"v7 429 with the code", v7Error(t, 429, 10008), false},
+		{"v7 500 with the code", v7Error(t, 500, 10008), false},
 	}
 
 	for _, tc := range tests {
