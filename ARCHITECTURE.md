@@ -48,7 +48,8 @@ Every controller follows the same shape:
 
 KVNamespace runs this loop through the shared CRUD reconciler (`internal/controller/crudresource_controller.go`), as the
 kinds the code generator produces will: the kind only describes its Cloudflare calls, its adoption key, what it compares
-and what depends on it.
+and what depends on it. Its API types are generated too, by kflare-gen from `generator/generator.yaml` and cloudflare-go
+v7 (`api/v1alpha1/zz_generated.kvnamespace_types.go`).
 
 Step 5 is deliberate: an idle reconcile makes read calls only. The live e2e suite checks this for DNSRecord,
 WAFCustomRule, RateLimitRule, ManagedRuleset and IPList, and TunnelConfiguration's comparison ignores fields Cloudflare
