@@ -4,15 +4,24 @@ Copyright 2026 Jonathan Graniero.
 SPDX-License-Identifier: MIT
 */
 
-// Package cloudflare provides a thin wrapper around the cloudflare-go SDK
-// and shared error classification utilities for kflare controllers.
+// Package cloudflare provides a thin wrapper around the cloudflare-go SDKs,
+// v0 and v7, and shared error classification utilities for kflare
+// controllers.
 package cloudflare
 
 import (
 	"errors"
+	"net/http"
 
 	cf "github.com/cloudflare/cloudflare-go"
+	"github.com/cloudflare/cloudflare-go/v7/kv"
 )
+
+// v7Error is the error cloudflare-go v7 returns for every response with an
+// error status. v7 documents it as cloudflare.Error, and every v7 package
+// re-exports it as Error; kv's is used here because kflare does not import
+// v7's root package (see Client.V7Options).
+type v7Error = kv.Error
 
 // IsTerminalError returns true if err represents a condition that will not
 // resolve by retrying — for example, an invalid token, insufficient
@@ -28,6 +37,13 @@ import (
 func IsTerminalError(err error) bool {
 	if err == nil {
 		return false
+	}
+
+	// cloudflare-go v7 returns one error type for every error status: any 4xx
+	// but 429 is terminal, as with v0's typed errors below.
+	if v7Err, ok := asV7Error(err); ok {
+		return v7Err.StatusCode >= 400 && v7Err.StatusCode < 500 &&
+			v7Err.StatusCode != http.StatusTooManyRequests
 	}
 
 	// HTTP 403 Forbidden — token lacks the required scope/permission.
@@ -64,6 +80,9 @@ func IsTerminalError(err error) bool {
 // This is useful in reconcilers that need to distinguish "resource missing"
 // from other terminal errors (e.g. to create the resource instead of failing).
 func IsNotFound(err error) bool {
+	if v7Err, ok := asV7Error(err); ok {
+		return v7Err.StatusCode == http.StatusNotFound
+	}
 	var notFoundErr *cf.NotFoundError
 	return errors.As(err, &notFoundErr)
 }
@@ -72,6 +91,9 @@ func IsNotFound(err error) bool {
 // Controllers can inspect this to apply custom back-off logic, though
 // controller-runtime's default exponential back-off is usually sufficient.
 func IsRateLimit(err error) bool {
+	if v7Err, ok := asV7Error(err); ok {
+		return v7Err.StatusCode == http.StatusTooManyRequests
+	}
 	var rlErr *cf.RatelimitError
 	return errors.As(err, &rlErr)
 }
@@ -82,6 +104,35 @@ func IsRateLimit(err error) bool {
 // that share an HTTP status, for example an R2 bucket that is not empty
 // (409, code 10008).
 func HasErrorCode(err error, code int) bool {
+	if v7Err, ok := asV7Error(err); ok {
+		if !isRequestErrorStatus(v7Err.StatusCode) {
+			return false
+		}
+		for _, e := range v7Err.Errors {
+			if e.Code == int64(code) {
+				return true
+			}
+		}
+		return false
+	}
 	var reqErr *cf.RequestError
 	return errors.As(err, &reqErr) && reqErr.InternalErrorCodeIs(code)
+}
+
+// asV7Error returns the cloudflare-go v7 API error in err's chain, if there is
+// one.
+func asV7Error(err error) (*v7Error, bool) {
+	var v7Err *v7Error
+	ok := errors.As(err, &v7Err)
+	return v7Err, ok
+}
+
+// isRequestErrorStatus reports whether v0 returns a RequestError for status:
+// a client error other than 401, 403, 404 and 429.
+func isRequestErrorStatus(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusTooManyRequests:
+		return false
+	}
+	return status >= 400 && status < 500
 }

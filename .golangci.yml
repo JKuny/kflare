@@ -8,6 +8,7 @@ run:
 linters:
   default: none
   enable:
+    - depguard
     - dupl
     - errcheck
     - goconst
@@ -22,6 +23,15 @@ linters:
     - unconvert
     - unparam
     - unused
+  settings:
+    depguard:
+      rules:
+        cloudflare-go-v7:
+          deny:
+            - pkg: github.com/cloudflare/cloudflare-go/v7$
+              desc: >-
+                v7's root package grows the manager by a third, and its NewClient reads CLOUDFLARE_* variables.
+                Build the services you call from cloudflare.Client.V7Options instead.
   exclusions:
     generated: lax
     rules:
