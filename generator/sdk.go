@@ -1,0 +1,275 @@
+/*
+Copyright 2026 Jonathan Graniero.
+
+SPDX-License-Identifier: MIT
+*/
+
+package main
+
+import (
+	"errors"
+	"fmt"
+	"go/ast"
+	"go/constant"
+	"go/token"
+	"go/types"
+	"reflect"
+	"strings"
+
+	"golang.org/x/tools/go/packages"
+)
+
+const (
+	// sdkModule is cloudflare-go v7's module. kflare-gen reads the version
+	// the module in its working directory requires.
+	sdkModule = "github.com/cloudflare/cloudflare-go/v7"
+	// paramPackage holds param.Field, the type of every field of a params
+	// struct.
+	paramPackage = sdkModule + "/internal/param"
+)
+
+// Where a param goes in a request.
+const (
+	inBody   = "body"
+	inPath   = "path"
+	inQuery  = "query"
+	inHeader = "header"
+)
+
+// service is what kflare-gen reads off a cloudflare-go v7 service type.
+type service struct {
+	// name is the service as an entry names it, such as kv.NamespaceService.
+	name string
+	// create holds the fields of New's params, update those of Update's (or
+	// Edit's), and object those of what Get returns. update is nil for a
+	// service that cannot change an object.
+	create, update, object []sdkField
+}
+
+// sdkField is one field of a params struct or of an object.
+type sdkField struct {
+	// goName is the SDK's Go name, such as Title.
+	goName string
+	// apiName is the field's name in the API: its json, path, query or
+	// header name, such as title or account_id.
+	apiName string
+	// in is where a param goes: body, path, query or header. An object's
+	// fields are all body.
+	in string
+	// typ is the field's type; for a param, the type inside param.Field.
+	typ types.Type
+	// required is set for a field tagged api:"required".
+	required bool
+	// doc is the SDK's documentation of the field.
+	doc string
+	// enum holds, for a named string type, its constants' values in the order
+	// the SDK declares them.
+	enum []string
+}
+
+// sdk loads cloudflare-go v7's packages.
+type sdk struct {
+	// dir is the directory of the module whose go.mod pins v7.
+	dir string
+}
+
+// service loads the service an entry names.
+func (s sdk) service(name string) (*service, error) {
+	dot := strings.LastIndex(name, ".")
+	if dot <= 0 || dot == len(name)-1 {
+		return nil, fmt.Errorf("service %q is not <package>.<type>", name)
+	}
+	path, typeName := sdkModule+"/"+name[:dot], name[dot+1:]
+	pkgs, err := packages.Load(&packages.Config{
+		Mode: packages.NeedName | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo,
+		Dir:  s.dir,
+	}, path)
+	if err != nil {
+		return nil, fmt.Errorf("loading %s: %w", path, err)
+	}
+	if len(pkgs) != 1 {
+		return nil, fmt.Errorf("loading %s: got %d packages", path, len(pkgs))
+	}
+	pkg := pkgs[0]
+	if len(pkg.Errors) > 0 {
+		return nil, fmt.Errorf("loading %s: %v", path, pkg.Errors[0])
+	}
+	typ, ok := pkg.Types.Scope().Lookup(typeName).(*types.TypeName)
+	if !ok {
+		return nil, fmt.Errorf("%s has no type %s", path, typeName)
+	}
+
+	r := newSDKReader(pkg)
+	methods := types.NewMethodSet(types.NewPointer(typ.Type()))
+	svc := &service{name: name}
+	if svc.create, _, err = r.call(methods, "New"); err != nil {
+		return nil, err
+	}
+	if _, svc.object, err = r.call(methods, "Get"); err != nil {
+		return nil, err
+	}
+	for _, method := range []string{"Update", "Edit"} {
+		svc.update, _, err = r.call(methods, method)
+		if !errors.Is(err, errNoMethod) {
+			break
+		}
+	}
+	if err != nil && !errors.Is(err, errNoMethod) {
+		return nil, err
+	}
+	return svc, nil
+}
+
+// errNoMethod is the error for a service without the method asked for.
+var errNoMethod = errors.New("no such method")
+
+// sdkReader reads types out of one loaded package.
+type sdkReader struct {
+	pkg *packages.Package
+	// specs indexes the package's type declarations by name.
+	specs map[string]*ast.TypeSpec
+}
+
+func newSDKReader(pkg *packages.Package) *sdkReader {
+	r := &sdkReader{pkg: pkg, specs: map[string]*ast.TypeSpec{}}
+	for _, file := range pkg.Syntax {
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				if ts, ok := spec.(*ast.TypeSpec); ok {
+					r.specs[ts.Name.Name] = ts
+				}
+			}
+		}
+	}
+	return r
+}
+
+// call reads a service method shaped (ctx, [id,] params, opts...) (*result,
+// error): it returns the fields of its params and of its result.
+func (r *sdkReader) call(methods *types.MethodSet, name string) (params, result []sdkField, err error) {
+	sel := methods.Lookup(r.pkg.Types, name)
+	if sel == nil {
+		return nil, nil, fmt.Errorf("%s: %w", name, errNoMethod)
+	}
+	sig := sel.Type().(*types.Signature)
+	if !sig.Variadic() || sig.Params().Len() < 3 || sig.Results().Len() != 2 {
+		return nil, nil, fmt.Errorf("%s is not shaped (ctx, [id,] params, opts...) (*result, error)", name)
+	}
+	if params, err = r.fields(sig.Params().At(sig.Params().Len()-2).Type(), true); err != nil {
+		return nil, nil, fmt.Errorf("%s's params: %w", name, err)
+	}
+	if result, err = r.fields(sig.Results().At(0).Type(), false); err != nil {
+		return nil, nil, fmt.Errorf("%s's result: %w", name, err)
+	}
+	return params, result, nil
+}
+
+// fields reads the fields of a struct type declared in the package, or of a
+// pointer to one: for params, the fields inside their param.Field.
+func (r *sdkReader) fields(t types.Type, params bool) ([]sdkField, error) {
+	if ptr, ok := t.(*types.Pointer); ok {
+		t = ptr.Elem()
+	}
+	named, ok := t.(*types.Named)
+	if !ok || named.Obj().Pkg() != r.pkg.Types {
+		return nil, fmt.Errorf("%s is not a type of %s", t, r.pkg.PkgPath)
+	}
+	st, ok := named.Underlying().(*types.Struct)
+	if !ok {
+		return nil, fmt.Errorf("%s is not a struct", named.Obj().Name())
+	}
+	docs := r.fieldDocs(named.Obj().Name())
+
+	var out []sdkField
+	for i := range st.NumFields() {
+		v, tag := st.Field(i), reflect.StructTag(st.Tag(i))
+		f := sdkField{goName: v.Name(), typ: v.Type(), required: tag.Get("api") == "required", doc: docs[v.Name()]}
+		for _, in := range []string{inPath, inQuery, inHeader} {
+			if name := tag.Get(in); name != "" {
+				f.in, f.apiName = in, name
+			}
+		}
+		if f.in == "" {
+			name, _, _ := strings.Cut(tag.Get("json"), ",")
+			if name == "" || name == "-" {
+				continue
+			}
+			f.in, f.apiName = inBody, name
+		}
+		if params {
+			inner, ok := paramFieldType(f.typ)
+			if !ok {
+				return nil, fmt.Errorf("%s.%s is a %s, not a param.Field: kflare-gen cannot map unions yet",
+					named.Obj().Name(), f.goName, types.TypeString(f.typ, types.RelativeTo(r.pkg.Types)))
+			}
+			f.typ = inner
+		}
+		f.enum = r.enumValues(f.typ)
+		out = append(out, f)
+	}
+	return out, nil
+}
+
+// paramFieldType returns T for param.Field[T].
+func paramFieldType(t types.Type) (types.Type, bool) {
+	named, ok := t.(*types.Named)
+	if !ok || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != paramPackage ||
+		named.Obj().Name() != "Field" || named.TypeArgs().Len() != 1 {
+		return nil, false
+	}
+	return named.TypeArgs().At(0), true
+}
+
+// fieldDocs returns the documentation of a struct type's fields, by Go name.
+func (r *sdkReader) fieldDocs(typeName string) map[string]string {
+	docs := map[string]string{}
+	spec, ok := r.specs[typeName]
+	if !ok {
+		return docs
+	}
+	st, ok := spec.Type.(*ast.StructType)
+	if !ok {
+		return docs
+	}
+	for _, field := range st.Fields.List {
+		for _, name := range field.Names {
+			docs[name.Name] = strings.TrimSpace(field.Doc.Text())
+		}
+	}
+	return docs
+}
+
+// enumValues returns the values of the constants of t, in the order the
+// package declares them, when t is a string type the package declares and
+// gives constants.
+func (r *sdkReader) enumValues(t types.Type) []string {
+	named, ok := t.(*types.Named)
+	if !ok || named.Obj().Pkg() != r.pkg.Types {
+		return nil
+	}
+	if basic, ok := named.Underlying().(*types.Basic); !ok || basic.Kind() != types.String {
+		return nil
+	}
+	var values []string
+	for _, file := range r.pkg.Syntax {
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				for _, ident := range spec.(*ast.ValueSpec).Names {
+					c, ok := r.pkg.TypesInfo.Defs[ident].(*types.Const)
+					if ok && types.Identical(c.Type(), named) {
+						values = append(values, constant.StringVal(c.Val()))
+					}
+				}
+			}
+		}
+	}
+	return values
+}

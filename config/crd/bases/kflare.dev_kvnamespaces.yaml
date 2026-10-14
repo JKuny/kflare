@@ -59,7 +59,7 @@ spec:
             properties:
               accountRef:
                 description: |-
-                  AccountRef references the CloudflareAccount that owns the namespace.
+                  AccountRef references the CloudflareAccount that owns the KV namespace.
                   Immutable after creation.
                 properties:
                   name:
@@ -103,7 +103,7 @@ spec:
                 type: object
               conditions:
                 description: Conditions represent the latest available observations
-                  of the namespace state.
+                  of the KV namespace state.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

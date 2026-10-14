@@ -1,0 +1,34 @@
+# The kinds kflare-gen generates, one entry each; `make codegen` writes their API types to
+# api/v1alpha1/zz_generated.<kind>_types.go. Every field of a kind's cloudflare-go v7 service (the params of New and
+# the object Get returns) becomes a field of the kind unless the entry ignores it, with the reason. Field names are the
+# API's, as in the SDK's json, path and query tags. See CLAUDE.md, "Code generator (kflare-gen)".
+kinds:
+  - kind: KVNamespace
+    service: kv.NamespaceService
+    scope: account
+    shortName: cfkv
+    noun: KV namespace
+    doc: |
+      KVNamespace is the Schema for the kvnamespaces API.
+      It represents a Cloudflare Workers KV namespace. Deleting it deletes the
+      namespace and all of its data, unless the retain deletion policy is set.
+    id:
+      field: id
+      status: namespaceID
+      doc: |
+        NamespaceID is the Cloudflare KV namespace identifier. WorkerScripts
+        bind the namespace by this ID.
+    claimLabel: kflare.dev/kv-namespace-id
+    fields:
+      title:
+        doc: |
+          Title is the namespace's title in Cloudflare, unique within the
+          account. Changing it renames the namespace in place; its ID and data
+          are kept.
+        printColumn: Title
+        # The bounds of the hand-written CRD, until feat/generator-openapi reads them from the OpenAPI spec.
+        minLength: 1
+        maxLength: 512
+    ignore:
+      jurisdiction: Not sent by the controller, and restricting a namespace to a jurisdiction is not verified live yet.
+      supports_url_encoding: Not observed by the controller yet.
