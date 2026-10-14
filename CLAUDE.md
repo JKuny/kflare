@@ -6,7 +6,7 @@ kflare is a production-grade Kubernetes operator for Cloudflare, enabling fully 
 
 The goal is to fill a gap in the ecosystem: existing community projects (adyanth/cloudflare-operator, containeroo/cloudflare-operator, replicatedhq/kubeflare) are narrowly scoped and inconsistently maintained. kflare targets production-grade quality with the intent to pursue official or CNCF-adjacent backing.
 
-**Key differentiator:** Code-generate controllers from the [Cloudflare OpenAPI spec](https://github.com/cloudflare/api-schemas), driving broad API coverage with consistent patterns.
+**Key differentiator:** Code-generate CRDs and controllers from Cloudflare's generated Go SDK and its [OpenAPI spec](https://github.com/cloudflare/api-schemas), driving broad API coverage with consistent patterns.
 
 ---
 
@@ -42,11 +42,12 @@ the same prefix (`kflare.dev/finalizer`, `kflare.dev/deletion-policy`, ...). The
 - **operator-sdk** for OLM compatibility (later phases)
 
 ### Code Generation Strategy
-- Parse the Cloudflare OpenAPI 3.0 spec (`api-schemas` repo) to generate:
-  - CRD type definitions (`types_*.go`)
-  - Basic reconciler skeletons
-  - Cloudflare API client wrappers
-- Hand-write reconciler logic where OpenAPI spec is insufficient
+Decided 2026-10-13; the plan is [Code generator (`kflare-gen`)](#code-generator-kflare-gen) in Phase 3.
+- `kflare-gen` reads a per-kind `generator.yaml`, the Go types of cloudflare-go v7 (the SDK Cloudflare generates from
+  its OpenAPI spec) and a pinned subset of that spec (`api-schemas` repo). It generates CRD types and each kind's
+  controller glue for a shared reconciler. It generates no client code: v7 is the client
+- What the API description cannot express, such as behavior verified live, stays hand-written as Go hooks
+- Controllers written before the generator stay hand-written unless moving them buys something
 
 ### Authentication Model
 - Per-namespace `Secret` containing `CF_API_TOKEN`
@@ -460,19 +461,21 @@ shared machinery once; each rule CRD on top of it is mostly types plus a convers
 | `feat/rate-limit-rule-controller` | `RateLimitRule` (was `RateLimit`) | rulesets-foundation | ✅ Free: 1 rule, 10 s period and timeout, counts by IP, block only |
 | `feat/ip-list-controller` | `IPList` | shared-client | ✅ Free: 1 IP list, 10,000 items |
 | `feat/zero-trust-controllers` | `AccessGroup`, `AccessPolicy`, `AccessApplication` | shared-client | Blocked: Zero Trust is not enabled on the account (a free plan exists) |
-| `feat/managed-ruleset-controller` | `ManagedRuleset` (was `WAFPackage`) | rulesets-foundation | **Next** (Zero Trust is blocked). Free: only the Cloudflare Free Managed Ruleset |
+| `feat/managed-ruleset-controller` | `ManagedRuleset` (was `WAFPackage`) | rulesets-foundation | **Next**, by hand (Zero Trust is blocked; decided 2026-10-13). Free: only the Cloudflare Free Managed Ruleset |
+| Code generator: `feat/cloudflare-go-v7` … `feat/generator-rule-kinds` (8 PRs) | none: `kflare-gen` and the shared CRUD reconciler; KVNamespace moves onto them; the first new generated kind (see [Code generator](#code-generator-kflare-gen)) | — | After `ManagedRuleset` (decided 2026-10-13) |
 | `feat/managed-transform-controller` | `ManagedTransform` | zone-controller | Free: all six transforms |
-| `feat/transform-rule-controller` | `TransformRule` | rulesets-foundation | Free: 10 rules, no regex |
-| `feat/redirect-rule-controller` | `RedirectRule` | rulesets-foundation | Free: 10 rules, no regex |
-| `feat/cache-rule-controller` | `CacheRule` | rulesets-foundation | Free: 10 rules |
-| `feat/configuration-rule-controller` | `ConfigurationRule` | rulesets-foundation | Free: 10 rules |
-| `feat/origin-rule-controller` | `OriginRule` | rulesets-foundation | Free: 10 rules, destination port override only |
+| `feat/transform-rule-controller` | `TransformRule` | code generator (rule kinds) | Generated. Free: 10 rules, no regex |
+| `feat/redirect-rule-controller` | `RedirectRule` | code generator (rule kinds) | Generated. Free: 10 rules, no regex |
+| `feat/cache-rule-controller` | `CacheRule` | code generator (rule kinds) | Generated. Free: 10 rules |
+| `feat/configuration-rule-controller` | `ConfigurationRule` | code generator (rule kinds) | Generated. Free: 10 rules |
+| `feat/origin-rule-controller` | `OriginRule` | code generator (rule kinds) | Generated. Free: 10 rules, destination port override only |
 | `feat/load-balancer-monitor-controller` | `LoadBalancerMonitor` | shared-client | ⏸ Deferred: needs Load Balancing add-on |
 | `feat/load-balancer-controller` | `LoadBalancer` (+ pools) | load-balancer-monitor-controller | ⏸ Deferred: needs Load Balancing add-on |
 
 Rows run top to bottom. The order decided on 2026-10-06 (WAF, then rate limiting, then Zero Trust) is kept. `IPList`
 comes before Zero Trust because it is free and can be tested today, while Zero Trust waits on a dashboard step. When a
-row is blocked, skip ahead: `IPList`, `ManagedTransform` and the five Rules rows do not depend on each other.
+row is blocked, skip ahead: `ManagedTransform` depends on no other row. The five Rules rows are generated (decided
+2026-10-13), so they wait for the code generator's rule kinds.
 
 `PageRule` is dropped (decided 2026-10-09): Page Rules is deprecated, and its API refuses account-owned tokens (see
 "Plan corrections" below). The Transform, Redirect, Cache, Configuration and Origin rows cover its settings.
@@ -519,7 +522,8 @@ permission group names; deploy.md uses the dashboard's labels, so look those up 
   enough. Check a new one with a short-lived token holding only deploy.md's permissions, as above (ask first)
 
 #### SDK decision
-**Status:** Accepted 2026-10-09. Step 1 is done: kflare uses cloudflare-go **v0.119.0**
+**Status:** Accepted 2026-10-09. Step 1 is done: kflare uses cloudflare-go **v0.119.0**. Step 3 is brought forward
+for generated kinds (2026-10-13)
 
 kflare pinned cloudflare-go v0.89.0 until October 2026, and its gaps kept costing features. Checked 2026-10-09:
 
@@ -540,7 +544,10 @@ Decided:
    returns the same typed errors as every other call. Still open: R2 jurisdictions
 3. **Move to the generated SDK later, controller by controller** (Phase 4, or sooner if the v0 line stops getting
    releases). Each controller already sits behind its own narrow interface, so `pkg/cloudflare.Client` can embed both
-   SDKs during the move, with `errors.go` classifying both error types until it is done
+   SDKs during the move, with `errors.go` classifying both error types until it is done. Brought forward on 2026-10-13
+   for the kinds the [code generator](#code-generator-kflare-gen) produces: they use v7 from the start, so
+   `feat/cloudflare-go-v7` adds v7 next to v0.119. A hand-written controller moves when v7 buys it something (R2Bucket:
+   jurisdictions and storage class), and the rule kinds move together in `feat/rulesets-v7`
 
 **Bump notes (v0.89 → v0.119, 2026-10-12):**
 - `DNSRecord` lost `ZoneID`, `ZoneName` and `Locked`. A DNSRecord's `status.cloudflareMetadata.zoneID` now comes from
@@ -903,7 +910,8 @@ An account-level custom IP list, for expressions such as `ip.src in $office_ips`
 **Status:** 🔲 Not started
 
 Deploys a Cloudflare managed ruleset to a zone, with overrides, through an `execute` rule in the
-`http_request_firewall_managed` phase.
+`http_request_firewall_managed` phase. Built by hand on the v0.119 foundation (decided 2026-10-13), not generated;
+`feat/rulesets-v7` later moves its conversion to v7 with the other rule kinds.
 
 - [ ] **Verify first:** Cloudflare runs the Free Managed Ruleset on Free zones without any entry point. Does creating an
   entry point in this phase, for example for a single exception, stop that default deployment? If it does, kflare must
@@ -932,10 +940,12 @@ Deploys a Cloudflare managed ruleset to a zone, with overrides, through an `exec
 
 
 #### Branches: Rules products (`TransformRule`, `RedirectRule`, `CacheRule`, `ConfigurationRule`, `OriginRule`)
-**Depend on:** `feat/rulesets-foundation`; one branch and PR each
+**Depend on:** the code generator's rule kinds (`feat/generator-rule-kinds`); one branch and PR each
 **Status:** 🔲 Not started
 
-Each is the foundation plus typed action parameters. Together they replace Page Rules.
+Each is the foundation plus typed action parameters. Together they replace Page Rules. They are generated (decided
+2026-10-13): each is a `generator.yaml` entry plus hooks for what Cloudflare's schema leaves out (see
+[Code generator](#code-generator-kflare-gen)).
 
 | CRD | Phase | Action | Free | Dev token |
 |-----|-------|--------|------|-----------|
@@ -945,13 +955,145 @@ Each is the foundation plus typed action parameters. Together they replace Page 
 | `ConfigurationRule` | `http_config_settings` | `set_config` | 10 rules | needs Config Settings Write |
 | `OriginRule` | `http_request_origin` | `route` | 10 rules, destination port only | needs Origin Write |
 
-- Spec fields mirror Cloudflare's action parameters, typed. Start with what Free and Pro can use and add the rest when
-  needed, rather than passing raw JSON through
+- Spec fields are v7's typed action parameters (`rulesets.RewriteRuleParam`, `RedirectRuleParam`,
+  `SetCacheSettingsRuleParam`, `SetConfigRuleParam`, `RouteRuleParam`), never raw JSON. Fields are opt-out (decided
+  2026-10-13), so a large surface such as cache settings starts with an `ignore` list for what has not been checked,
+  which shrinks as fields are verified
 - Check whether Free's 10 transform rules are counted per phase or across the three
-- These five share one shape, which makes them the natural first target for the OpenAPI generator, if it is still
-  wanted (see below)
 - Not planned yet: Bulk Redirects (the account-level `http_request_redirect` phase plus redirect lists; Free: 15 rules,
   5 lists, 10,000 URL redirects)
+
+
+#### Code generator (`kflare-gen`)
+**Depends on:** `feat/shared-client`, `feat/rulesets-foundation`; eight PRs, in order, after `ManagedRuleset`
+**Status:** 🔲 Not started. Planned and decided 2026-10-13
+
+Most of a new kind is the same wiring every time. IPList (#26) changed 27 files (+2,596 lines). Besides its types and
+its bulk-operation logic, it repeated `Get/SetConditions`, registration in `cmd/main.go`, the CRD kustomization, the
+Helm `edit` role, the account watch and protection entry, the narrow API interface and its factory, and the lifecycle
+specs every CRUD kind has (finalizer, account not ready, invalid token, create and claim, idle reconcile writes
+nothing, update in place, adopt, conflict, recreate, retain, failed deletions retried). `kflare-gen` generates that
+part from Cloudflare's own description of its API. What Cloudflare does not describe stays hand-written.
+
+**Decided (2026-10-13):**
+1. Generated kinds use cloudflare-go **v7** from the start, bringing [SDK decision](#sdk-decision) step 3 forward for
+   them only. v0.119 is hand-written, with no machine-readable list of its resources and operations to generate from
+2. Fields are **opt-out**: a generated kind has every field v7 exposes for it, minus those its entry ignores. The
+   output is committed, so each field an SDK bump adds shows up in review
+3. `ManagedRuleset` is built by hand next, as planned; `feat/rulesets-v7` moves its conversion to v7 later
+4. The first new kind generated end to end is a free, account-level resource: a D1 database or a Turnstile widget,
+   picked when that PR starts, after checking the Free-plan limits and the token permission
+
+**Sources (checked 2026-10-13):**
+- cloudflare-go v7.12.0 has an `api.md` in every package that maps each method to its verb and route, for example
+  `post /accounts/{account_id}/storage/kv/namespaces` → `client.KV.Namespaces.New`. Of its 939 services, 213 are
+  CRUD-shaped (`New`, plus `Get` and `Delete` by ID: 157 account-level, 37 zone-level, 13 either, 6 other such as
+  zones themselves) and 90 are settings-style singletons (`Get` plus `Update` or `Edit`, without `New` or `Delete`).
+  Its Go types give the fields, required markers (`api:"required"`) and enums (typed string constants), but no
+  lengths, patterns, ranges or defaults
+- The OpenAPI spec ([cloudflare/api-schemas](https://github.com/cloudflare/api-schemas), BSD-3-Clause; `openapi.json`
+  is OpenAPI 3.0.3, 27 MB, 2,339 paths) has those: a KV title of at most 512 characters, a list name of at most 50
+  with a pattern. It also carries Stainless's hints, `x-sensitive`, `x-stainless-collection-type: set` and
+  `x-stainless-terraform-configurability` (`computed`, `optional`, `computed_optional`), and per operation
+  `x-api-token-group` (API permission names) and `x-cfPlanAvailability`
+- Immutability can be read off the SDK. The fields kflare made immutable by hand are v7's create-only fields: R2's
+  `name` and `locationHint` and the list's `name` are in the create params but not the update params. R2's
+  `storageClass` is in `Edit`, so mutable, as Deferred says, and v7 sends the jurisdiction and storage-class headers
+  that v0.119 cannot
+- The OpenAPI spec runs ahead of the SDK (its KV create takes a `mode` that v7.12.0 lacks), and it is not always the
+  live API: its list-name pattern allows uppercase, which Cloudflare refuses (10029, see IPList)
+
+**Design.** It follows ACK's code-generator (AWS Controllers for Kubernetes): per-kind YAML plus the SDK's model, and
+generated code on a shared runtime. Unlike ACK, hooks are Go functions rather than templates, and API defaults become
+CRD defaults, so nothing is late-initialized.
+
+- **Inputs:**
+  - `generator/generator.yaml`, one entry per kind: kind and short name, scope, ID, adoption key and claim label,
+    ignored fields, overrides, print columns
+  - v7's Go types, loaded with `go/packages` at the version in `go.mod`, so the generated glue is type-checked
+    against the SDK it calls
+  - A subset of the OpenAPI spec under `generator/openapi/`: the operations and schemas the configured kinds use,
+    written by `kflare-gen sync-spec` from a pinned api-schemas commit. `make codegen` reads only the subset, so it
+    runs offline and constraint changes are reviewed. Operations match the SDK by verb and route from `api.md` (a
+    `/{accounts_or_zones}/…` route matches both the `/accounts/…` and `/zones/…` paths), fields by JSON path. The
+    SDK decides which fields exist; the OpenAPI spec only adds constraints and hints
+- **Mapping defaults** (an entry can override any of them):
+  - snake_case → lowerCamel JSON with Go initialisms (`statusCode`, `namespaceID`); field docs from the SDK comments
+  - `account_id` / `zone_id` → an immutable `accountRef` / `zoneRef`, which also brings the credential chain, the
+    parent watch and the protection entry
+  - Create-only fields → `self == oldSelf`, with an envtest case each (convention 7). OpenAPI lengths, patterns,
+    ranges and defaults → kubebuilder markers; typed string constants → `Enum`
+  - API defaults become CRD defaults, so a resource's spec and Cloudflare's copy compare directly. A field Cloudflare
+    fills in itself (`computed_optional` without a default) is compared only when the resource sets it: DNSRecord's
+    `priority` rule, generalized
+  - Sets → `+listType=set`, sorted in the conversion (as WAFCustomRule and RateLimitRule do by hand); `x-sensitive` →
+    a `SecretKeySelector`; the ID and computed fields → `status.cloudflareMetadata`
+  - Unions → one kind per variant (rules), or a struct of optional members with a CEL exactly-one rule (bindings), as
+    the entry says
+  - A field that Cloudflare's read cannot return is refused unless the entry says how to detect its drift (a hash in
+    status, as WorkerScript does) or ignores it
+- **Outputs**, marked `// Code generated by kflare-gen. DO NOT EDIT.` and committed. `make codegen` runs before
+  controller-gen, and CI's `git diff --exit-code` catches stale output:
+  - `api/v1alpha1/zz_generated.<kind>_types.go`: spec, status, list, markers, print columns, `Get/SetConditions`
+  - `internal/controller/zz_generated.<kind>.go`: the narrow v7 interface, spec → create and update params, response →
+    status, the drift comparison, RBAC markers and the kind's descriptor
+  - Registration (`cmd/main.go` makes one call for every generated kind), protection entries, the CRD kustomization,
+    the Helm `edit` role and a sample
+  - An envtest table per kind: the lifecycle specs above and the immutability cases
+- **Shared CRUD reconciler** (hand-written, `crudresource_controller.go`, the counterpart of
+  `rulesetrule_controller.go`): ARCHITECTURE.md's reconcile loop for any kind a `crudResourceKind` describes, with
+  adoption by key and claim labels (`claimedIDs`/`claimID`), recreation after a 404, writes only on drift, the retain
+  policy and waiting for dependents. Deletion blockers are data: `{code: 10008, reason: BucketNotEmpty}`,
+  `{code: 10041, reason: ListInUse}`. It carries the coverage target, which excludes generated files
+- **Hooks:** optional Go functions in a hand-written `<kind>_hooks.go`, compiled and linted like any other code: adjust
+  the desired params, normalize Cloudflare's copy before comparing, extra steps after a sync, extra watches. IPList's
+  bulk operation and RateLimitRule's `cf.colo.id` are this kind of logic
+
+```yaml
+KVNamespace:
+  service: KV.Namespaces        # v7 client path; operations default to New/Get/Update/Delete/List
+  scope: account                # accountRef, credential chain, account watch, protection entry
+  shortName: cfkv
+  id: {field: ID, status: namespaceID}
+  adopt: {by: title, claimLabel: kflare.dev/kv-namespace-id, conflictReason: TitleConflict}
+  fields:
+    title: {printColumn: Title}
+    # jurisdiction is create-only in v7, so it comes out immutable without configuration
+```
+
+**PRs**, one at a time against main:
+
+| # | Branch | Change | Done when |
+|---|--------|--------|-----------|
+| 1 | `feat/cloudflare-go-v7` | v7 next to v0.119: `pkg/cloudflare.Client` holds a v7 client, and `errors.go` also classifies `*cloudflare.Error` | Unit tests pass. Nothing uses v7 yet |
+| 2 | `feat/crud-reconciler` | The shared CRUD reconciler, with KVNamespace hand-ported onto it and onto v7, whose `Get` ends the list-and-match workaround | KVNamespace's specs (fake adapted) and the live e2e pass |
+| 3 | `feat/generator-types` | `generator/`: SDK loader, model, `generator.yaml`, types emitter, golden tests, `make codegen` | KVNamespace's regenerated CRD matches the hand-written one, or differs only on purpose |
+| 4 | `feat/generator-openapi` | `kflare-gen sync-spec`, the committed subset, constraints and hints | Golden tests: the constraints generated for KVNamespace, R2Bucket and IPList match their CRDs, or the entry says why not |
+| 5 | `feat/generator-controllers` | The controller emitter: descriptor, conversions, drift, RBAC, registration, protection, sample, envtest table | KVNamespace is fully generated and its hand port deleted; its specs and the live e2e pass |
+| 6 | `feat/<kind>-controller` | The first new kind, generated end to end (decision 4) | Only its entry, any hooks and its live e2e spec are hand-written |
+| 7 | `feat/rulesets-v7` | The Rulesets foundation on v7: `Phases.Get`, `Rulesets.New` and `Rules.New/Edit/Delete` (with positions) replace the `Raw` calls in `pkg/cloudflare/rulesets.go`; the rule kinds' conversions move to v7 | Rule specs and the live e2e pass, with the rule delete checked live again (v0.119's fails) |
+| 8 | `feat/generator-rule-kinds` | A rule-kind emitter: the action parameters' types from v7's rule variants (`rulesets.RewriteRuleParam` and siblings) and the `definition` conversion, with `TransformRule` as its first kind | `TransformRule`'s live e2e passes. The other four Rules kinds follow, one PR each |
+
+- `TransformRule` goes first because the dev token can already write its phases. Its immutable `spec.type` picks one
+  of three phases, so the foundation's one phase per kind becomes a function of the spec
+- **Later:** a runtime for settings-style singletons (the shape of TunnelConfiguration and ManagedTransform; the 90
+  singletons include zone settings), cross-kind references such as `kvNamespaceRef`, generated live e2e specs, and
+  deploy.md permission rows from `x-api-token-group` (API names, while deploy.md uses the dashboard's labels; the
+  shared Rulesets endpoints list every phase's permission)
+- **Stays hand-written:** `Zone`, `DNSRecord`, `Tunnel`, `TunnelConfiguration`, `WorkerScript` and `WorkerRoute`, which
+  are mostly behavior verified live. Moving a hand-written kind needs a reason: R2Bucket would gain jurisdictions and
+  storage class
+- **Ruled out:** generating from v0.119 (no machine-readable model); OpenAPI alone with kflare's own wire types (it
+  rebuilds the client v7 already generates from the same spec); Terraform provider schemas, Crossplane's upjet
+  approach (it ties kflare to Terraform's resource model, and the spec already carries Stainless's Terraform hints)
+
+**Risks:**
+- The OpenAPI spec is not the live API (the list-name pattern above). Generated constraints are a starting point and
+  live probes decide; an override in the entry records what was verified. When unsure, keep the looser rule: a
+  too-strict CRD blocks valid configurations, while a loose one ends in a `TerminalError` with Cloudflare's message
+- SDK major versions rename types. Entries and hooks name SDK types, so a major bump is its own regenerate-and-review
+  PR
+- Two SDKs share the binary for a while: two error families (PR 1) and two retry setups to keep consistent
 
 
 #### Release and CI
@@ -968,11 +1110,6 @@ Each is the foundation plus typed action parameters. Together they replace Page 
 - [ ] `kflare.dev` expires on 2027-10-04 with auto-renew off (registered 2026-10-04). The e2e zone disappears if it
   lapses: decide on renewal before September 2027
 - [ ] Open question: a Terraform `infra/` root for `kflare.dev` (zone, renewal, CI token, GitHub secrets)
-
-**Also in Phase 3:**
-- [ ] OpenAPI-to-CRD generator skeleton (`generator/` package) — parses the [Cloudflare OpenAPI spec](https://github.com/cloudflare/api-schemas) to generate CRD type definitions and reconciler skeletons; intended to accelerate the long tail of resources beyond what is hand-written in Phase 2
-  - Rescope before starting: the generated SDK (v7) already produces client code from the same spec, so the
-    generator would only need CRD types and controller skeletons. The five Rules CRDs are the natural first target
 
 ---
 
@@ -1083,6 +1220,7 @@ export CF_E2E_ZONE=kflare.dev               # zone for the DNS e2e specs; adopte
 
 > **Phases 1 and 2 complete. Phase 3 in progress: `KVNamespace`, `R2Bucket`, `WAFCustomRule`, `RateLimitRule` and
 > `IPList` done.** cloudflare-go is at v0.119; rule kinds share the Rulesets foundation and controller. Next:
-> `ManagedRuleset`, since Zero Trust still waits on account setup (see Phase 3). Items needing a paid plan, add-on
-> or account setup are tracked under "Deferred: paid plan, add-on or account setup" in Phase 3.
+> `ManagedRuleset`, by hand, since Zero Trust still waits on account setup; then the code generator, `kflare-gen`
+> (see Phase 3). Items needing a paid plan, add-on or account setup are tracked under "Deferred: paid plan, add-on
+> or account setup" in Phase 3.
 > Last updated: October 2026
