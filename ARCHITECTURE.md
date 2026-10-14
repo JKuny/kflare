@@ -163,9 +163,12 @@ seconds once the entry point is deleted (verified live on `kflare.dev`, with a r
 - A ManagedRuleset deploys its ruleset explicitly, which keeps it running on a zone that had it by default. To turn it
   off, keep the ManagedRuleset and set `enabled: false`, or override the rules' `enabled` or `action`.
 - When deleting a ManagedRuleset leaves the phase's entry point without rules, kflare deletes the entry point, which
-  hands the zone back to Cloudflare's default. It keeps an emptied entry point while another kflare rule in the phase
-  is about to be written to it, and every deletion re-triggers the zone's other ManagedRulesets, so one whose rule was
-  written in the moment before the entry point went writes it again.
+  hands the zone back to Cloudflare's default. It does so even when the entry point was there, empty, before kflare,
+  and had turned the default off: keeping every entry point kflare did not create would leave a zone without managed
+  rules once its other rules were gone, and turning the default back on is the safer mistake. It keeps an emptied
+  entry point while another kflare rule in the phase is about to be written to it, and every deletion re-triggers the
+  zone's other ManagedRulesets, so one whose rule was written in the moment before the entry point went writes it
+  again.
 - A zone deploys a managed ruleset at most once (400, code 20014). A ManagedRuleset whose ruleset another rule already
   deploys reports `RulesetConflict` and checks again every minute, or as soon as another ManagedRuleset goes, so that a
   ManagedRuleset replaced by one with another name hands over within seconds.

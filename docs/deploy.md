@@ -41,8 +41,7 @@ Create an API token in the Cloudflare dashboard (**My Profile → API Tokens**, 
 | `IPList` | Account · Account Rule Lists · Edit |
 
 These are enough on their own: in October 2026 a token holding only them (with Zone · Zone · Read, and without
-Billing) ran kflare's full live test suite against an existing zone. `ManagedRuleset` came after that run, so Zone WAF
-alone has not been checked for it yet. Scope zone permissions to the zones kflare
+Billing) ran kflare's full live test suite against an existing zone. Scope zone permissions to the zones kflare
 should manage. Note the account ID, shown on the account's overview page.
 
 ## 2. Install the chart
@@ -163,9 +162,9 @@ Things to know before pointing kflare at existing infrastructure:
 - **Managed rulesets.** Cloudflare deploys its Free Managed Ruleset to Free zones by default, but only while the
   zone has no rules of its own in the managed phase. A `ManagedRuleset` deploys a ruleset explicitly, so the zone
   keeps it; to turn it off, set the ManagedRuleset's `enabled: false` rather than deleting it. Deleting the last
-  ManagedRuleset in a zone hands it back to Cloudflare's default. A zone deploys each ruleset once: a second
-  deployment, or one a rule created outside kflare already makes, reports `RulesetConflict`. Free zones can only
-  deploy the Free Managed Ruleset.
+  ManagedRuleset in a zone hands it back to Cloudflare's default, which turns the Free Managed Ruleset on again even
+  if it was off before kflare. A zone deploys each ruleset once: a second deployment, or one a rule created outside
+  kflare already makes, reports `RulesetConflict`. Free zones can only deploy the Free Managed Ruleset.
 - **Immutable fields.** Names and references (`spec.name`, `accountRef`, `zoneRef`, DNS `type`, ...) cannot be
   changed. Create a new resource instead.
 

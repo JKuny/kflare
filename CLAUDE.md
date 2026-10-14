@@ -503,7 +503,7 @@ permission group names; deploy.md uses the dashboard's labels, so look those up 
 
 | Resource | Permission to document (least privilege) | Dev token today |
 |---|---|---|
-| `WAFCustomRule`, `RateLimitRule`, `ManagedRuleset` | Zone WAF Write | ✅ dry run accepted; enough on its own for the first two (2026-10-13, see below) |
+| `WAFCustomRule`, `RateLimitRule`, `ManagedRuleset` | Zone WAF Write | ✅ dry run accepted; enough on its own (2026-10-13 and 2026-10-14, see below) |
 | `TransformRule` | Zone Transform Rules Write | ✅ dry run accepted |
 | `RedirectRule` | Dynamic URL Redirects Write | ❌ 403, "request is not authorized" |
 | `CacheRule` | Cache Settings Write | ❌ 403 |
@@ -521,6 +521,9 @@ permission group names; deploy.md uses the dashboard's labels, so look those up 
   manager's log. It was refused for transform rules, account rulesets and API tokens. So Zone WAF Write alone covers
   `WAFCustomRule` and `RateLimitRule`, and Zone Read is enough to adopt a zone. The token expired within 3 hours and
   was deleted after the run
+- Repeated on 2026-10-14 for `ManagedRuleset`, with the user's OK: a token with the same permissions ran the suite, 14
+  of 14 (run `fef249`), with no refusal, and kflare deleted the managed phase's emptied entry point with it. So Zone
+  WAF Write covers `ManagedRuleset` too. That token was deleted after the run as well
 - The dev token's account-level permissions cover more than deploy.md lists, so it cannot show that a permission is
   enough. Check a new one with a short-lived token holding only deploy.md's permissions, as above (ask first)
 
@@ -948,6 +951,11 @@ Deploys a Cloudflare managed ruleset to a zone, with overrides, through an `exec
   deployment, so it must reference a ManagedRuleset (`managedRulesetRef`) and wait for it to be ready. It must also run
   before the `execute` rule it skips, which needs a rank per kind in the foundation's ordering. Meanwhile a rule or
   category override with `enabled: false` turns a misfiring rule off for every request
+- **An entry point that was empty before kflare** is deleted like any other once kflare's last rule leaves it
+  (decided 2026-10-14). That entry point had turned the default off, so deleting the last ManagedRuleset turns it back
+  on. Telling the two apart would need a mark on the entry points kflare creates, and then an entry point someone else
+  created, and later emptied, would stay and leave the zone without managed rules. Turning the default back on is the
+  safer mistake. To keep it off, keep a ManagedRuleset with `enabled: false`
 
 **ManagedRuleset design notes (verified live on `kflare.dev`, 2026-10-14):**
 - The default deployment was checked with a probe Worker behind a proxied `kflare-probe-*` hostname. A request carrying
@@ -970,8 +978,7 @@ Deploys a Cloudflare managed ruleset to a zone, with overrides, through an `exec
   `logging` on an execute rule (20018), the `block` action in this phase (20016), and a second execute rule for a
   ruleset the zone already deploys (20014, "more than one rule is trying to execute the same managed ruleset")
 - Exceptions: Free accepts skip rules here with `rulesets`, `rules`, `ruleset: current` and `phases`
-- deploy.md documents Zone · Zone WAF · Edit. The dev token writes the phase through its account-level permissions, so
-  a token holding only Zone WAF has not been run against it (ask before creating one)
+- deploy.md documents Zone · Zone WAF · Edit, which is enough on its own (verified 2026-10-14, see Token permissions)
 
 
 #### Branch: `feat/managed-transform-controller`
