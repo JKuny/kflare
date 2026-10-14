@@ -11,7 +11,9 @@ package cloudflare
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 
 	cf "github.com/cloudflare/cloudflare-go"
 	"github.com/cloudflare/cloudflare-go/v7/kv"
@@ -125,6 +127,31 @@ func asV7Error(err error) (*v7Error, bool) {
 	var v7Err *v7Error
 	ok := errors.As(err, &v7Err)
 	return v7Err, ok
+}
+
+// ErrorMessage returns what a condition says about err. For an API error from
+// cloudflare-go v7, that is Cloudflare's messages with their codes, as v0's
+// errors read ("namespace not found (10013)"), rather than v7's request line
+// and raw response body. Any other error reads as it is.
+func ErrorMessage(err error) string {
+	v7Err, ok := asV7Error(err)
+	if !ok {
+		return err.Error()
+	}
+	messages := make([]string, 0, len(v7Err.Errors))
+	for _, e := range v7Err.Errors {
+		message := e.Message
+		if e.Code != 0 {
+			message = strings.TrimSpace(fmt.Sprintf("%s (%d)", message, e.Code))
+		}
+		if message != "" {
+			messages = append(messages, message)
+		}
+	}
+	if len(messages) == 0 {
+		return fmt.Sprintf("HTTP %d %s", v7Err.StatusCode, http.StatusText(v7Err.StatusCode))
+	}
+	return strings.Join(messages, ", ")
 }
 
 // isRequestErrorStatus reports whether v0 returns a RequestError for status:

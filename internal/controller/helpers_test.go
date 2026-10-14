@@ -8,8 +8,12 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 
 	cf "github.com/cloudflare/cloudflare-go"
+	"github.com/cloudflare/cloudflare-go/v7/kv"
 	. "github.com/onsi/gomega"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -43,4 +47,23 @@ func cloudflareError(status, code int) error {
 	e.Type = cf.ErrorTypeRequest
 	v := cf.NewRequestError(e)
 	return &v
+}
+
+// v7APIError builds the error cloudflare-go v7 returns when Cloudflare answers
+// a request for path, relative to the API's base URL, with an HTTP status and
+// a Cloudflare error. The type is the same in every v7 package; kv's alias
+// names it here. Its Error method reads the request and the response, so both
+// are set.
+func v7APIError(method, path string, status, code int, message string) error {
+	req := httptest.NewRequest(method, "https://api.cloudflare.com/client/v4/"+path, nil)
+	return &kv.Error{
+		StatusCode: status,
+		Errors:     []kv.ErrorData{{Code: int64(code), Message: message}},
+		Request:    req,
+		Response: &http.Response{
+			StatusCode: status,
+			Status:     fmt.Sprintf("%d %s", status, http.StatusText(status)),
+			Request:    req,
+		},
+	}
 }

@@ -95,13 +95,16 @@ func invalidToken(ctx context.Context, c client.StatusClient, obj conditionedObj
 // handleCloudflareError reports a failed Cloudflare API call on obj. Terminal
 // errors (4xx) are not requeued: they need a change to the spec or the
 // credentials, which re-triggers the reconcile. Anything else is returned so
-// controller-runtime retries with back-off.
+// controller-runtime retries with back-off. The condition shows Cloudflare's
+// messages and codes (cfpkg.ErrorMessage); the returned error, which
+// controller-runtime logs, keeps everything.
 func handleCloudflareError(ctx context.Context, c client.StatusClient, obj conditionedObject, err error) (ctrl.Result, error) {
+	message := cfpkg.ErrorMessage(err)
 	if cfpkg.IsTerminalError(err) {
 		return ctrl.Result{}, updateNotReady(ctx, c, obj, "TerminalError",
-			fmt.Sprintf("Terminal Cloudflare API error: %v", err))
+			fmt.Sprintf("Terminal Cloudflare API error: %s", message))
 	}
-	if statusErr := updateNotReady(ctx, c, obj, "APIError", fmt.Sprintf("Cloudflare API error: %v", err)); statusErr != nil {
+	if statusErr := updateNotReady(ctx, c, obj, "APIError", fmt.Sprintf("Cloudflare API error: %s", message)); statusErr != nil {
 		return ctrl.Result{}, statusErr
 	}
 	return ctrl.Result{}, err

@@ -40,7 +40,14 @@ func v7Error(t *testing.T, status int, codes ...int) error {
 	for _, code := range codes {
 		errs = append(errs, map[string]any{"code": code, "message": "rejected"})
 	}
-	body := mustJSON(t, map[string]any{"result": nil, "success": false, "errors": errs, "messages": []any{}})
+	return v7ErrorBody(t, status, mustJSON(t, map[string]any{"result": nil, "success": false, "errors": errs,
+		"messages": []any{}}))
+}
+
+// v7ErrorBody returns the error cloudflare-go v7 returns when Cloudflare
+// answers with status and body.
+func v7ErrorBody(t *testing.T, status int, body string) error {
+	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -277,6 +284,32 @@ func TestHasErrorCode(t *testing.T) {
 			got := cfpkg.HasErrorCode(tc.err, 10008)
 			if got != tc.has {
 				t.Errorf("HasErrorCode(%v, 10008) = %v, want %v", tc.err, got, tc.has)
+			}
+		})
+	}
+}
+
+func TestErrorMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"v7 error with a code", v7Error(t, 404, 10013), "rejected (10013)"},
+		{"v7 error with two codes", v7Error(t, 400, 10005, 10008), "rejected (10005), rejected (10008)"},
+		{"v7 error without codes", v7Error(t, 503), "HTTP 503 Service Unavailable"},
+		{"v7 error whose only entry is empty", v7ErrorBody(t, 502,
+			`{"result":null,"success":false,"errors":[{"code":0,"message":""}],"messages":[]}`), "HTTP 502 Bad Gateway"},
+		{"wrapped v7 error", fmt.Errorf("outer: %w", v7Error(t, 404, 10013)), "rejected (10013)"},
+		{"v0 error", ptrRequest(&cf.Error{StatusCode: 400, ErrorCodes: []int{10014},
+			Errors: []cf.ResponseInfo{{Code: 10014, Message: "title already exists"}}}), "title already exists (10014)"},
+		{"plain error", errors.New("connection refused"), "connection refused"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cfpkg.ErrorMessage(tc.err); got != tc.want {
+				t.Errorf("ErrorMessage(%v) = %q, want %q", tc.err, got, tc.want)
 			}
 		})
 	}

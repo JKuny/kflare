@@ -10,8 +10,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"net/http"
+	"slices"
 
-	cf "github.com/cloudflare/cloudflare-go"
+	"github.com/cloudflare/cloudflare-go/v7/kv"
+	"github.com/cloudflare/cloudflare-go/v7/option"
+	"github.com/cloudflare/cloudflare-go/v7/packages/pagination"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -26,45 +31,49 @@ import (
 	"github.com/JonathanGraniero/kflare/pkg/reconciler"
 )
 
-// fakeKVNamespaceAPI is an in-memory Workers KV namespaces API for one
-// account. It follows the behavior verified against the live API: titles are
-// unique in an account (a duplicate is a 400), a rename keeps the ID, and an
-// unknown namespace ID is a 404. Like cloudflare-go, it rejects a resource
-// container that is not account-level.
+// fakeKVNamespaceAPI is an in-memory cloudflare-go v7 KV namespace service
+// for one account. It follows the behavior verified against the live API:
+// titles are unique in an account (a duplicate is a 400, code 10014), a rename
+// keeps the ID and returns the renamed namespace, an unknown namespace ID is a
+// 404 (code 10013), and the list pages by number, at most 1,000 namespaces to
+// a page (more is a 400, code 10008). Like cloudflare-go, it refuses a call
+// without an account ID.
 type fakeKVNamespaceAPI struct {
-	namespaces map[string]cf.WorkersKVNamespace
+	namespaces map[string]kv.Namespace
 	nextID     int
 
-	createErr, listErr, updateErr, deleteErr error
+	createErr, getErr, listErr, updateErr, deleteErr error
 
 	accountIDs []string
+	listPages  []int64
 	writes     int
 }
 
-func newFakeKVNamespaceAPI(existing ...cf.WorkersKVNamespace) *fakeKVNamespaceAPI {
-	f := &fakeKVNamespaceAPI{namespaces: map[string]cf.WorkersKVNamespace{}}
+func newFakeKVNamespaceAPI(existing ...kv.Namespace) *fakeKVNamespaceAPI {
+	f := &fakeKVNamespaceAPI{namespaces: map[string]kv.Namespace{}}
 	for _, ns := range existing {
 		f.namespaces[ns.ID] = ns
 	}
 	return f
 }
 
-func kvNotFound() error {
-	v := cf.NewNotFoundError(&cf.Error{StatusCode: 404, Type: cf.ErrorTypeNotFound})
-	return &v
-}
-
-func kvRequestError() error {
-	v := cf.NewRequestError(&cf.Error{StatusCode: 400, Type: cf.ErrorTypeRequest})
-	return &v
-}
-
-func (f *fakeKVNamespaceAPI) record(rc *cf.ResourceContainer) error {
-	f.accountIDs = append(f.accountIDs, rc.Identifier)
-	if rc.Level != cf.AccountRouteLevel {
-		return cf.ErrRequiredAccountLevelResourceContainer
+// account records the account ID a call names, which cloudflare-go requires.
+func (f *fakeKVNamespaceAPI) account(id string) error {
+	f.accountIDs = append(f.accountIDs, id)
+	if id == "" {
+		return errors.New("missing required account_id parameter")
 	}
 	return nil
+}
+
+func kvNamespaceNotFound(method, accountID, namespaceID string) error {
+	return v7APIError(method, fmt.Sprintf("accounts/%s/storage/kv/namespaces/%s", accountID, namespaceID),
+		http.StatusNotFound, 10013, "namespace not found")
+}
+
+func kvTitleTaken(method, accountID string) error {
+	return v7APIError(method, fmt.Sprintf("accounts/%s/storage/kv/namespaces", accountID),
+		http.StatusBadRequest, 10014, "a namespace with this account ID and title already exists")
 }
 
 func (f *fakeKVNamespaceAPI) titleTaken(title string) bool {
@@ -76,70 +85,99 @@ func (f *fakeKVNamespaceAPI) titleTaken(title string) bool {
 	return false
 }
 
-func (f *fakeKVNamespaceAPI) CreateWorkersKVNamespace(_ context.Context, rc *cf.ResourceContainer, params cf.CreateWorkersKVNamespaceParams) (cf.WorkersKVNamespaceResponse, error) {
-	if err := f.record(rc); err != nil {
-		return cf.WorkersKVNamespaceResponse{}, err
+func (f *fakeKVNamespaceAPI) New(_ context.Context, params kv.NamespaceNewParams, _ ...option.RequestOption) (*kv.Namespace, error) {
+	if err := f.account(params.AccountID.Value); err != nil {
+		return nil, err
 	}
 	f.writes++
 	if f.createErr != nil {
-		return cf.WorkersKVNamespaceResponse{}, f.createErr
+		return nil, f.createErr
 	}
-	if f.titleTaken(params.Title) {
-		return cf.WorkersKVNamespaceResponse{}, kvRequestError()
+	if f.titleTaken(params.Title.Value) {
+		return nil, kvTitleTaken(http.MethodPost, params.AccountID.Value)
 	}
 	f.nextID++
-	ns := cf.WorkersKVNamespace{ID: fmt.Sprintf("kv-%d", f.nextID), Title: params.Title}
+	ns := kv.Namespace{ID: fmt.Sprintf("kv-%d", f.nextID), Title: params.Title.Value}
 	f.namespaces[ns.ID] = ns
-	return cf.WorkersKVNamespaceResponse{Result: ns}, nil
+	return &ns, nil
 }
 
-func (f *fakeKVNamespaceAPI) ListWorkersKVNamespaces(_ context.Context, rc *cf.ResourceContainer, _ cf.ListWorkersKVNamespacesParams) ([]cf.WorkersKVNamespace, *cf.ResultInfo, error) {
-	if err := f.record(rc); err != nil {
-		return nil, &cf.ResultInfo{}, err
+func (f *fakeKVNamespaceAPI) Get(_ context.Context, namespaceID string, query kv.NamespaceGetParams,
+	_ ...option.RequestOption) (*kv.Namespace, error) {
+	if err := f.account(query.AccountID.Value); err != nil {
+		return nil, err
 	}
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	ns, ok := f.namespaces[namespaceID]
+	if !ok {
+		return nil, kvNamespaceNotFound(http.MethodGet, query.AccountID.Value, namespaceID)
+	}
+	return &ns, nil
+}
+
+func (f *fakeKVNamespaceAPI) List(_ context.Context, params kv.NamespaceListParams,
+	_ ...option.RequestOption) (*pagination.V4PagePaginationArray[kv.Namespace], error) {
+	if err := f.account(params.AccountID.Value); err != nil {
+		return nil, err
+	}
+	page, perPage := int64(params.Page.Value), int64(params.PerPage.Value)
+	f.listPages = append(f.listPages, page)
 	if f.listErr != nil {
-		return nil, &cf.ResultInfo{}, f.listErr
+		return nil, f.listErr
 	}
-	var out []cf.WorkersKVNamespace
-	for _, ns := range f.namespaces {
-		out = append(out, ns)
+	if perPage > kvNamespaceListPageSize {
+		return nil, v7APIError(http.MethodGet, fmt.Sprintf("accounts/%s/storage/kv/namespaces", params.AccountID.Value),
+			http.StatusBadRequest, 10008, "list namespaces: 'per_page argument must be no greater than 1000'")
 	}
-	return out, &cf.ResultInfo{}, nil
+	ids := slices.Sorted(maps.Keys(f.namespaces))
+	start := min(max(page-1, 0)*perPage, int64(len(ids)))
+	end := min(start+perPage, int64(len(ids)))
+	res := &pagination.V4PagePaginationArray[kv.Namespace]{
+		ResultInfo: pagination.V4PagePaginationArrayResultInfo{Page: page, PerPage: perPage},
+	}
+	for _, id := range ids[start:end] {
+		res.Result = append(res.Result, f.namespaces[id])
+	}
+	return res, nil
 }
 
-func (f *fakeKVNamespaceAPI) UpdateWorkersKVNamespace(_ context.Context, rc *cf.ResourceContainer, params cf.UpdateWorkersKVNamespaceParams) (cf.Response, error) {
-	if err := f.record(rc); err != nil {
-		return cf.Response{}, err
+func (f *fakeKVNamespaceAPI) Update(_ context.Context, namespaceID string, params kv.NamespaceUpdateParams,
+	_ ...option.RequestOption) (*kv.Namespace, error) {
+	if err := f.account(params.AccountID.Value); err != nil {
+		return nil, err
 	}
 	f.writes++
 	if f.updateErr != nil {
-		return cf.Response{}, f.updateErr
+		return nil, f.updateErr
 	}
-	ns, ok := f.namespaces[params.NamespaceID]
+	ns, ok := f.namespaces[namespaceID]
 	if !ok {
-		return cf.Response{}, kvNotFound()
+		return nil, kvNamespaceNotFound(http.MethodPut, params.AccountID.Value, namespaceID)
 	}
-	if ns.Title != params.Title && f.titleTaken(params.Title) {
-		return cf.Response{}, kvRequestError()
+	if ns.Title != params.Title.Value && f.titleTaken(params.Title.Value) {
+		return nil, kvTitleTaken(http.MethodPut, params.AccountID.Value)
 	}
-	ns.Title = params.Title
+	ns.Title = params.Title.Value
 	f.namespaces[ns.ID] = ns
-	return cf.Response{Success: true}, nil
+	return &ns, nil
 }
 
-func (f *fakeKVNamespaceAPI) DeleteWorkersKVNamespace(_ context.Context, rc *cf.ResourceContainer, namespaceID string) (cf.Response, error) {
-	if err := f.record(rc); err != nil {
-		return cf.Response{}, err
+func (f *fakeKVNamespaceAPI) Delete(_ context.Context, namespaceID string, body kv.NamespaceDeleteParams,
+	_ ...option.RequestOption) (*kv.NamespaceDeleteResponse, error) {
+	if err := f.account(body.AccountID.Value); err != nil {
+		return nil, err
 	}
 	f.writes++
 	if f.deleteErr != nil {
-		return cf.Response{}, f.deleteErr
+		return nil, f.deleteErr
 	}
 	if _, ok := f.namespaces[namespaceID]; !ok {
-		return cf.Response{}, kvNotFound()
+		return nil, kvNamespaceNotFound(http.MethodDelete, body.AccountID.Value, namespaceID)
 	}
 	delete(f.namespaces, namespaceID)
-	return cf.Response{Success: true}, nil
+	return &kv.NamespaceDeleteResponse{}, nil
 }
 
 var _ = Describe("KVNamespace Controller", func() {
@@ -195,9 +233,9 @@ var _ = Describe("KVNamespace Controller", func() {
 	}
 
 	getKV := func() *cloudflarev1alpha1.KVNamespace {
-		kv := &cloudflarev1alpha1.KVNamespace{}
-		Expect(k8sClient.Get(ctx, kvKey, kv)).To(Succeed())
-		return kv
+		obj := &cloudflarev1alpha1.KVNamespace{}
+		Expect(k8sClient.Get(ctx, kvKey, obj)).To(Succeed())
+		return obj
 	}
 
 	readyCondition := func() metav1.Condition {
@@ -272,11 +310,12 @@ var _ = Describe("KVNamespace Controller", func() {
 			_, err := reconcileKV()
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(fake.namespaces).To(HaveKeyWithValue("kv-1", cf.WorkersKVNamespace{ID: "kv-1", Title: title}))
+			Expect(fake.namespaces).To(HaveKeyWithValue("kv-1", kv.Namespace{ID: "kv-1", Title: title}))
 			Expect(fake.accountIDs).To(HaveEach(fakeAcctID))
-			kv := getKV()
-			Expect(kv.Status.CloudflareMetadata.NamespaceID).To(Equal("kv-1"))
-			Expect(kv.Labels).To(HaveKeyWithValue(cloudflarev1alpha1.KVNamespaceIDLabel, "kv-1"))
+			Expect(fake.listPages).To(Equal([]int64{1}), "one page holds every namespace of the account")
+			obj := getKV()
+			Expect(obj.Status.CloudflareMetadata.NamespaceID).To(Equal("kv-1"))
+			Expect(obj.Labels).To(HaveKeyWithValue(cloudflarev1alpha1.KVNamespaceIDLabel, "kv-1"))
 			Expect(readyCondition().Status).To(Equal(metav1.ConditionTrue))
 		})
 
@@ -287,14 +326,33 @@ var _ = Describe("KVNamespace Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			writes := fake.writes
 
+			pages := len(fake.listPages)
+
 			_, err = reconcileKV()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(fake.writes).To(Equal(writes))
+			Expect(fake.listPages).To(HaveLen(pages), "the namespace is read by its ID, not found in the list")
+		})
+
+		It("adopts a namespace from a later page of the list", func() {
+			createAccount(true)
+			// A full first page of other namespaces; the one to adopt sorts last.
+			existing := make([]kv.Namespace, 0, kvNamespaceListPageSize+1)
+			for i := range kvNamespaceListPageSize {
+				existing = append(existing, kv.Namespace{ID: fmt.Sprintf("a-%04d", i), Title: fmt.Sprintf("other-%04d", i)})
+			}
+			fake = newFakeKVNamespaceAPI(append(existing, kv.Namespace{ID: "z-last", Title: title})...)
+			createKV(kvName, title, nil)
+			_, err := reconcileKV()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(fake.listPages).To(Equal([]int64{1, 2}))
+			Expect(getKV().Status.CloudflareMetadata.NamespaceID).To(Equal("z-last"))
+			Expect(fake.writes).To(BeZero())
 		})
 
 		It("adopts the existing namespace with its title", func() {
 			createAccount(true)
-			fake = newFakeKVNamespaceAPI(cf.WorkersKVNamespace{ID: "existing", Title: title})
+			fake = newFakeKVNamespaceAPI(kv.Namespace{ID: "existing", Title: title})
 			createKV(kvName, title, nil)
 			_, err := reconcileKV()
 			Expect(err).NotTo(HaveOccurred())
@@ -304,7 +362,7 @@ var _ = Describe("KVNamespace Controller", func() {
 
 		It("reports TitleConflict instead of taking over a namespace another KVNamespace manages", func() {
 			createAccount(true)
-			fake = newFakeKVNamespaceAPI(cf.WorkersKVNamespace{ID: "taken", Title: title})
+			fake = newFakeKVNamespaceAPI(kv.Namespace{ID: "taken", Title: title})
 			createKV(otherKV, title, nil)
 			other := &cloudflarev1alpha1.KVNamespace{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: otherKV, Namespace: ns}, other)).To(Succeed())
@@ -329,9 +387,9 @@ var _ = Describe("KVNamespace Controller", func() {
 
 			_, err = reconcileKV()
 			Expect(err).NotTo(HaveOccurred())
-			kv := getKV()
-			Expect(kv.Status.CloudflareMetadata.NamespaceID).To(Equal("kv-2"))
-			Expect(kv.Labels).To(HaveKeyWithValue(cloudflarev1alpha1.KVNamespaceIDLabel, "kv-2"))
+			obj := getKV()
+			Expect(obj.Status.CloudflareMetadata.NamespaceID).To(Equal("kv-2"))
+			Expect(obj.Labels).To(HaveKeyWithValue(cloudflarev1alpha1.KVNamespaceIDLabel, "kv-2"))
 		})
 
 		It("renames the namespace in place when spec.title changes", func() {
@@ -340,12 +398,12 @@ var _ = Describe("KVNamespace Controller", func() {
 			_, err := reconcileKV()
 			Expect(err).NotTo(HaveOccurred())
 
-			kv := getKV()
-			kv.Spec.Title = "kv-test-renamed"
-			Expect(k8sClient.Update(ctx, kv)).To(Succeed())
+			obj := getKV()
+			obj.Spec.Title = "kv-test-renamed"
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
 			_, err = reconcileKV()
 			Expect(err).NotTo(HaveOccurred())
-			Expect(fake.namespaces).To(HaveKeyWithValue("kv-1", cf.WorkersKVNamespace{ID: "kv-1", Title: "kv-test-renamed"}))
+			Expect(fake.namespaces).To(HaveKeyWithValue("kv-1", kv.Namespace{ID: "kv-1", Title: "kv-test-renamed"}))
 			Expect(getKV().Status.CloudflareMetadata.NamespaceID).To(Equal("kv-1"))
 		})
 
@@ -354,15 +412,17 @@ var _ = Describe("KVNamespace Controller", func() {
 			createKV(kvName, title, nil)
 			_, err := reconcileKV()
 			Expect(err).NotTo(HaveOccurred())
-			fake.namespaces["other"] = cf.WorkersKVNamespace{ID: "other", Title: "kv-taken-title"}
+			fake.namespaces["other"] = kv.Namespace{ID: "other", Title: "kv-taken-title"}
 
-			kv := getKV()
-			kv.Spec.Title = "kv-taken-title"
-			Expect(k8sClient.Update(ctx, kv)).To(Succeed())
+			obj := getKV()
+			obj.Spec.Title = "kv-taken-title"
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
 			result, err := reconcileKV()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.IsZero()).To(BeTrue())
 			Expect(readyCondition().Reason).To(Equal("TerminalError"))
+			Expect(readyCondition().Message).To(Equal("Terminal Cloudflare API error: " +
+				"a namespace with this account ID and title already exists (10014)"))
 		})
 
 		It("returns retryable errors for back-off", func() {
@@ -377,6 +437,35 @@ var _ = Describe("KVNamespace Controller", func() {
 			fake.createErr = errors.New("unavailable")
 			_, err = reconcileKV()
 			Expect(err).To(MatchError("unavailable"))
+		})
+
+		It("returns a failed read of the namespace for back-off", func() {
+			createAccount(true)
+			createKV(kvName, title, nil)
+			_, err := reconcileKV()
+			Expect(err).NotTo(HaveOccurred())
+
+			fake.getErr = v7APIError(http.MethodGet, "accounts/acct-kv-123/storage/kv/namespaces/kv-1",
+				http.StatusServiceUnavailable, 0, "")
+			_, err = reconcileKV()
+			Expect(err).To(MatchError(fake.getErr))
+			Expect(readyCondition().Reason).To(Equal("APIError"))
+			Expect(readyCondition().Message).To(Equal("Cloudflare API error: HTTP 503 Service Unavailable"))
+		})
+
+		It("returns a failed update for back-off", func() {
+			createAccount(true)
+			createKV(kvName, title, nil)
+			_, err := reconcileKV()
+			Expect(err).NotTo(HaveOccurred())
+
+			obj := getKV()
+			obj.Spec.Title = "kv-test-renamed"
+			Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+			fake.updateErr = errors.New("unavailable")
+			_, err = reconcileKV()
+			Expect(err).To(MatchError("unavailable"))
+			Expect(fake.namespaces["kv-1"].Title).To(Equal(title))
 		})
 	})
 
@@ -476,7 +565,7 @@ var _ = Describe("KVNamespace Controller", func() {
 		})
 
 		It("does nothing for a namespace without the finalizer", func() {
-			result, err := r.reconcileDelete(ctx, &cloudflarev1alpha1.KVNamespace{})
+			result, err := r.crud().reconcileDelete(ctx, &cloudflarev1alpha1.KVNamespace{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.IsZero()).To(BeTrue())
 		})
@@ -486,15 +575,15 @@ var _ = Describe("KVNamespace Controller", func() {
 		BeforeEach(func() { createKV(kvName, title, nil) })
 
 		It("rejects changing spec.accountRef", func() {
-			kv := getKV()
-			kv.Spec.AccountRef.Name = "other-account"
-			Expect(k8sClient.Update(ctx, kv)).To(MatchError(ContainSubstring("accountRef is immutable")))
+			obj := getKV()
+			obj.Spec.AccountRef.Name = "other-account"
+			Expect(k8sClient.Update(ctx, obj)).To(MatchError(ContainSubstring("accountRef is immutable")))
 		})
 
 		It("rejects an empty title", func() {
-			kv := getKV()
-			kv.Spec.Title = ""
-			Expect(k8sClient.Update(ctx, kv)).To(MatchError(ContainSubstring("spec.title")))
+			obj := getKV()
+			obj.Spec.Title = ""
+			Expect(k8sClient.Update(ctx, obj)).To(MatchError(ContainSubstring("spec.title")))
 		})
 	})
 })

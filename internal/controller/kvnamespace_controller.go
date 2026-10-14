@@ -8,39 +8,43 @@ package controller
 
 import (
 	"context"
-	"fmt"
 
-	cf "github.com/cloudflare/cloudflare-go"
+	"github.com/cloudflare/cloudflare-go/v7/kv"
+	"github.com/cloudflare/cloudflare-go/v7/option"
+	"github.com/cloudflare/cloudflare-go/v7/packages/pagination"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	cloudflarev1alpha1 "github.com/JonathanGraniero/kflare/api/v1alpha1"
 	cfpkg "github.com/JonathanGraniero/kflare/pkg/cloudflare"
-	"github.com/JonathanGraniero/kflare/pkg/reconciler"
 )
 
-// KVNamespaceAPI is the subset of the Cloudflare API used by this controller.
-// Declaring a narrow interface keeps unit tests simple: tests inject a fake
-// that implements only these methods. In production, *cfpkg.Client satisfies
-// this interface because it embeds *cf.API.
-//
-// cloudflare-go v0.89 has no call to read one namespace, so the controller
-// lists them (the SDK pages through all of them) and matches by ID.
+// kvNamespaceListPageSize is how many namespaces a page of the list asks for:
+// the most Cloudflare returns (verified live; a larger page is refused with
+// code 10008).
+const kvNamespaceListPageSize = 1000
+
+// KVNamespaceAPI is the part of cloudflare-go v7's KV namespace service that
+// this controller calls. Declaring a narrow interface keeps unit tests simple:
+// tests inject a fake that implements only these methods. In production it is
+// a *kv.NamespaceService.
 type KVNamespaceAPI interface {
-	CreateWorkersKVNamespace(ctx context.Context, rc *cf.ResourceContainer, params cf.CreateWorkersKVNamespaceParams) (cf.WorkersKVNamespaceResponse, error)
-	ListWorkersKVNamespaces(ctx context.Context, rc *cf.ResourceContainer, params cf.ListWorkersKVNamespacesParams) ([]cf.WorkersKVNamespace, *cf.ResultInfo, error)
-	UpdateWorkersKVNamespace(ctx context.Context, rc *cf.ResourceContainer, params cf.UpdateWorkersKVNamespaceParams) (cf.Response, error)
-	DeleteWorkersKVNamespace(ctx context.Context, rc *cf.ResourceContainer, namespaceID string) (cf.Response, error)
+	New(ctx context.Context, params kv.NamespaceNewParams, opts ...option.RequestOption) (*kv.Namespace, error)
+	Get(ctx context.Context, namespaceID string, query kv.NamespaceGetParams,
+		opts ...option.RequestOption) (*kv.Namespace, error)
+	List(ctx context.Context, params kv.NamespaceListParams,
+		opts ...option.RequestOption) (*pagination.V4PagePaginationArray[kv.Namespace], error)
+	Update(ctx context.Context, namespaceID string, params kv.NamespaceUpdateParams,
+		opts ...option.RequestOption) (*kv.Namespace, error)
+	Delete(ctx context.Context, namespaceID string, body kv.NamespaceDeleteParams,
+		opts ...option.RequestOption) (*kv.NamespaceDeleteResponse, error)
 }
 
-// KVNamespaceReconciler reconciles a KVNamespace object.
+var _ KVNamespaceAPI = (*kv.NamespaceService)(nil)
+
+// KVNamespaceReconciler reconciles a KVNamespace object, with the shared CRUD
+// reconciler (crudresource_controller.go).
 type KVNamespaceReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -57,177 +61,75 @@ type KVNamespaceReconciler struct {
 //+kubebuilder:rbac:groups=kflare.dev,resources=workerscripts,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
+// kvNamespaceKind describes KVNamespaces to the shared CRUD reconciler. A
+// namespace is adopted by its title, which is unique in an account; only the
+// title can change, and a rename keeps the namespace's ID and data. A
+// namespace deleted outside kflare is created again, empty. A KVNamespace
+// waits for the WorkerScripts bound to it before it is deleted: Cloudflare
+// deletes a namespace a Worker is bound to, but every later upload of that
+// Worker then fails.
+var kvNamespaceKind = crudResourceKind[*cloudflarev1alpha1.KVNamespace, KVNamespaceAPI, kv.Namespace]{
+	name:      "KVNamespace",
+	noun:      "KV namespace",
+	newObject: func() *cloudflarev1alpha1.KVNamespace { return &cloudflarev1alpha1.KVNamespace{} },
+	newList:   func() client.ObjectList { return &cloudflarev1alpha1.KVNamespaceList{} },
+
+	accountRef:     func(obj *cloudflarev1alpha1.KVNamespace) string { return obj.Spec.AccountRef.Name },
+	key:            func(obj *cloudflarev1alpha1.KVNamespace) string { return obj.Spec.Title },
+	claimLabel:     cloudflarev1alpha1.KVNamespaceIDLabel,
+	conflictReason: "TitleConflict",
+	statusID: func(obj *cloudflarev1alpha1.KVNamespace) string {
+		return obj.Status.CloudflareMetadata.NamespaceID
+	},
+	observe: func(obj *cloudflarev1alpha1.KVNamespace, ns *kv.Namespace) {
+		obj.Status.CloudflareMetadata.NamespaceID = ns.ID
+	},
+
+	id:        func(ns *kv.Namespace) string { return ns.ID },
+	objectKey: func(ns *kv.Namespace) string { return ns.Title },
+	matches: func(obj *cloudflarev1alpha1.KVNamespace, ns *kv.Namespace) bool {
+		return ns.Title == obj.Spec.Title
+	},
+
+	get: func(ctx context.Context, api KVNamespaceAPI, accountID, id string) (*kv.Namespace, error) {
+		var params kv.NamespaceGetParams
+		params.AccountID.Value, params.AccountID.Present = accountID, true
+		return api.Get(ctx, id, params)
+	},
+	list: func(ctx context.Context, api KVNamespaceAPI, accountID string,
+		page int64) (*pagination.V4PagePaginationArray[kv.Namespace], error) {
+		var params kv.NamespaceListParams
+		params.AccountID.Value, params.AccountID.Present = accountID, true
+		params.Page.Value, params.Page.Present = float64(page), true
+		params.PerPage.Value, params.PerPage.Present = kvNamespaceListPageSize, true
+		return api.List(ctx, params)
+	},
+	create: func(ctx context.Context, api KVNamespaceAPI, accountID string,
+		obj *cloudflarev1alpha1.KVNamespace) (*kv.Namespace, error) {
+		var params kv.NamespaceNewParams
+		params.AccountID.Value, params.AccountID.Present = accountID, true
+		params.Title.Value, params.Title.Present = obj.Spec.Title, true
+		return api.New(ctx, params)
+	},
+	update: func(ctx context.Context, api KVNamespaceAPI, accountID, id string,
+		obj *cloudflarev1alpha1.KVNamespace) (*kv.Namespace, error) {
+		var params kv.NamespaceUpdateParams
+		params.AccountID.Value, params.AccountID.Present = accountID, true
+		params.Title.Value, params.Title.Present = obj.Spec.Title, true
+		return api.Update(ctx, id, params)
+	},
+	delete: func(ctx context.Context, api KVNamespaceAPI, accountID, id string) error {
+		var params kv.NamespaceDeleteParams
+		params.AccountID.Value, params.AccountID.Present = accountID, true
+		_, err := api.Delete(ctx, id, params)
+		return err
+	},
+
+	dependents: kvNamespaceDependents,
+}
+
 func (r *KVNamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
-	kv := &cloudflarev1alpha1.KVNamespace{}
-	if err := r.Get(ctx, req.NamespacedName, kv); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
-
-	// Handle deletion before anything else.
-	if !kv.DeletionTimestamp.IsZero() {
-		return r.reconcileDelete(ctx, kv)
-	}
-
-	// Ensure the finalizer is present before doing any work.
-	// On the very first reconcile the finalizer is absent — add it and return.
-	// controller-runtime will re-enqueue the object once the update is visible.
-	added, err := reconciler.EnsureFinalizer(ctx, r.Client, kv)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if added {
-		logger.Info("Added finalizer", "kvnamespace", req.NamespacedName)
-		return ctrl.Result{}, nil
-	}
-
-	account, token, credErr := resolveAccountToken(ctx, r.Client, kv.Spec.AccountRef.Name, true)
-	if credErr != nil {
-		return notReadyRetryAfter(ctx, r.Client, kv, credErr)
-	}
-
-	cfAPI, err := r.newKVNamespaceAPI(token)
-	if err != nil {
-		return invalidToken(ctx, r.Client, kv, err)
-	}
-
-	return r.syncNamespace(ctx, kv, account, cfAPI)
-}
-
-// syncNamespace drives the desired→observed→delta→reconcile loop for a KVNamespace.
-func (r *KVNamespaceReconciler) syncNamespace(
-	ctx context.Context,
-	kv *cloudflarev1alpha1.KVNamespace,
-	account *cloudflarev1alpha1.CloudflareAccount,
-	cfAPI KVNamespaceAPI,
-) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	rc := cf.AccountIdentifier(account.Spec.AccountID)
-
-	namespaces, _, err := cfAPI.ListWorkersKVNamespaces(ctx, rc, cf.ListWorkersKVNamespacesParams{})
-	if err != nil {
-		return handleCloudflareError(ctx, r.Client, kv, err)
-	}
-
-	// Observe the namespace by the ID in status. If it is gone, it was deleted
-	// outside kflare together with its data; a new, empty one is created.
-	current, found := kvNamespaceWithID(namespaces, kv.Status.CloudflareMetadata.NamespaceID)
-	if !found && kv.Status.CloudflareMetadata.NamespaceID != "" {
-		logger.Info("KV namespace deleted outside kflare, recreating",
-			"namespaceID", kv.Status.CloudflareMetadata.NamespaceID)
-	}
-
-	// No namespace yet: adopt the one with this title (titles are unique in
-	// an account) unless another KVNamespace manages it, or create one.
-	if !found {
-		claimed, err := claimedIDs(ctx, r.Client, &cloudflarev1alpha1.KVNamespaceList{},
-			cloudflarev1alpha1.KVNamespaceIDLabel, kv)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if existing, ok := kvNamespaceWithTitle(namespaces, kv.Spec.Title); ok {
-			if owner, taken := claimed[existing.ID]; taken {
-				return notReadyRetryAfter(ctx, r.Client, kv, &conditionError{
-					Reason:  "TitleConflict",
-					Message: fmt.Sprintf("KV namespace %q is already managed by KVNamespace %s", kv.Spec.Title, owner),
-				})
-			}
-			current = existing
-			logger.Info("Adopted existing KV namespace", "title", existing.Title, "namespaceID", existing.ID)
-		} else {
-			created, err := cfAPI.CreateWorkersKVNamespace(ctx, rc, cf.CreateWorkersKVNamespaceParams{Title: kv.Spec.Title})
-			if err != nil {
-				return handleCloudflareError(ctx, r.Client, kv, err)
-			}
-			current = created.Result
-			logger.Info("Created KV namespace", "title", current.Title, "namespaceID", current.ID)
-		}
-	}
-
-	// Claim the namespace before anything else can fail, so no other
-	// KVNamespace adopts it in the meantime.
-	if err := claimID(ctx, r.Client, kv, cloudflarev1alpha1.KVNamespaceIDLabel, current.ID); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Drift: the title. A rename keeps the namespace and its data.
-	if current.Title != kv.Spec.Title {
-		if _, err := cfAPI.UpdateWorkersKVNamespace(ctx, rc, cf.UpdateWorkersKVNamespaceParams{
-			NamespaceID: current.ID,
-			Title:       kv.Spec.Title,
-		}); err != nil {
-			return handleCloudflareError(ctx, r.Client, kv, err)
-		}
-		logger.Info("Renamed KV namespace", "namespaceID", current.ID, "from", current.Title, "to", kv.Spec.Title)
-	}
-
-	kv.Status.CloudflareMetadata.NamespaceID = current.ID
-	return ctrl.Result{}, updateReady(ctx, r.Client, kv, "Synced", "KV namespace is synced with Cloudflare")
-}
-
-// kvNamespaceWithID returns the namespace with id, which must not be empty.
-func kvNamespaceWithID(namespaces []cf.WorkersKVNamespace, id string) (cf.WorkersKVNamespace, bool) {
-	if id == "" {
-		return cf.WorkersKVNamespace{}, false
-	}
-	for _, ns := range namespaces {
-		if ns.ID == id {
-			return ns, true
-		}
-	}
-	return cf.WorkersKVNamespace{}, false
-}
-
-// kvNamespaceWithTitle returns the namespace titled title.
-func kvNamespaceWithTitle(namespaces []cf.WorkersKVNamespace, title string) (cf.WorkersKVNamespace, bool) {
-	for _, ns := range namespaces {
-		if ns.Title == title {
-			return ns, true
-		}
-	}
-	return cf.WorkersKVNamespace{}, false
-}
-
-// reconcileDelete handles the deletion lifecycle. Once no WorkerScript binds
-// the namespace, it deletes the namespace and all its data from Cloudflare
-// (unless the retain policy is set), then removes the finalizer.
-//
-// Cloudflare deletes a namespace that a Worker is still bound to, but every
-// later upload of that Worker then fails, so bound WorkerScripts go first.
-func (r *KVNamespaceReconciler) reconcileDelete(ctx context.Context, kv *cloudflarev1alpha1.KVNamespace) (ctrl.Result, error) {
-	// Safety check: if the finalizer is already gone, there is nothing to do.
-	if !controllerutil.ContainsFinalizer(kv, reconciler.Finalizer) {
-		return ctrl.Result{}, nil
-	}
-
-	dependents, err := dependentsOf(ctx, r.Client, kv.Namespace, kv.Name, kvNamespaceDependents)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if len(dependents) > 0 {
-		return ctrl.Result{}, reportInUse(ctx, r.Client, kv, dependents)
-	}
-
-	namespaceID := kv.Status.CloudflareMetadata.NamespaceID
-	if namespaceID != "" && !reconciler.RetainOnDelete(kv) {
-		account, token, credErr := resolveAccountToken(ctx, r.Client, kv.Spec.AccountRef.Name, false)
-		if credErr != nil {
-			return ctrl.Result{}, credErr
-		}
-		cfAPI, err := r.newKVNamespaceAPI(token)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		_, err = cfAPI.DeleteWorkersKVNamespace(ctx, cf.AccountIdentifier(account.Spec.AccountID), namespaceID)
-		if err != nil && !cfpkg.IsNotFound(err) {
-			return ctrl.Result{}, err
-		}
-	}
-
-	// Remove the finalizer to allow Kubernetes to complete the deletion.
-	_, err = reconciler.RemoveFinalizer(ctx, r.Client, kv)
-	return ctrl.Result{}, err
+	return r.crud().reconcile(ctx, req)
 }
 
 // SetupWithManager registers KVNamespaceReconciler with the manager. It
@@ -235,48 +137,27 @@ func (r *KVNamespaceReconciler) reconcileDelete(ctx context.Context, kv *cloudfl
 // reconciled once the account is ready, and deleted WorkerScripts, so a
 // namespace waiting for the Workers bound to it is released.
 func (r *KVNamespaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&cloudflarev1alpha1.KVNamespace{}).
-		Watches(&cloudflarev1alpha1.CloudflareAccount{}, handler.EnqueueRequestsFromMapFunc(r.namespacesForAccount)).
-		Watches(&cloudflarev1alpha1.WorkerScript{},
-			handler.EnqueueRequestsFromMapFunc(r.deletingKVNamespacesOf), builder.WithPredicates(deletesOnly)).
-		Complete(r)
+	return r.crud().setup(mgr, r)
 }
 
-// namespacesForAccount maps a CloudflareAccount event to the KVNamespaces that use it.
-func (r *KVNamespaceReconciler) namespacesForAccount(ctx context.Context, obj client.Object) []reconcile.Request {
-	list := &cloudflarev1alpha1.KVNamespaceList{}
-	if err := r.List(ctx, list); err != nil {
-		return nil
+// crud returns the shared CRUD reconciler for KVNamespaces, with the injected
+// factory or the production one.
+func (r *KVNamespaceReconciler) crud() *crudResourceReconciler[*cloudflarev1alpha1.KVNamespace, KVNamespaceAPI, kv.Namespace] {
+	newAPI := r.NewKVNamespaceAPI
+	if newAPI == nil {
+		newAPI = defaultKVNamespaceAPI
 	}
-	var reqs []reconcile.Request
-	for _, kv := range list.Items {
-		if kv.Spec.AccountRef.Name == obj.GetName() {
-			reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{Name: kv.Name, Namespace: kv.Namespace}})
-		}
+	return &crudResourceReconciler[*cloudflarev1alpha1.KVNamespace, KVNamespaceAPI, kv.Namespace]{
+		Client: r.Client, kind: kvNamespaceKind, newAPI: newAPI,
 	}
-	return reqs
 }
 
-// deletingKVNamespacesOf maps the deletion of a WorkerScript to the
-// KVNamespaces it binds that are themselves being deleted.
-func (r *KVNamespaceReconciler) deletingKVNamespacesOf(ctx context.Context, obj client.Object) []reconcile.Request {
-	return deletingParentOf(ctx, r.Client, obj, func() client.Object { return &cloudflarev1alpha1.KVNamespace{} },
-		true, kvNamespaceDependents)
-}
-
-// newKVNamespaceAPI builds a KVNamespaceAPI with the injected factory,
-// falling back to the production client.
-func (r *KVNamespaceReconciler) newKVNamespaceAPI(token string) (KVNamespaceAPI, error) {
-	if r.NewKVNamespaceAPI != nil {
-		return r.NewKVNamespaceAPI(token)
-	}
-	return defaultKVNamespaceAPI(token)
-}
-
-// defaultKVNamespaceAPI is the production factory: it delegates to cfpkg.New
-// so that the returned *cfpkg.Client (which embeds *cf.API) satisfies
-// KVNamespaceAPI.
+// defaultKVNamespaceAPI is the production factory: cloudflare-go v7's KV
+// namespace service, built from cfpkg.New's options for the token.
 func defaultKVNamespaceAPI(token string) (KVNamespaceAPI, error) {
-	return cfpkg.New(token)
+	client, err := cfpkg.New(token)
+	if err != nil {
+		return nil, err
+	}
+	return kv.NewNamespaceService(client.V7Options()...), nil
 }
