@@ -1,0 +1,26 @@
+# Deploys the Cloudflare Free Managed Ruleset to every request in example.com,
+# with the WordPress rules only logging their matches and one Log4j rule
+# turned off. Cloudflare deploys this ruleset to Free zones by default, but
+# only while the zone has no rules of its own in the managed phase: once a
+# ManagedRuleset is there, the rulesets it deploys are what runs. Deleting the
+# last one hands the zone back to Cloudflare's default.
+apiVersion: kflare.dev/v1alpha1
+kind: ManagedRuleset
+metadata:
+  name: example-free-managed-ruleset
+  namespace: default
+spec:
+  zoneRef:
+    name: example-zone                          # a Zone in the same namespace
+  rulesetID: 77454fe2d30c4220b5701f6fdfb893ba   # Cloudflare Free Managed Ruleset
+  expression: "true"                            # every request
+  description: Cloudflare Free Managed Ruleset
+  overrides:
+    # enabled: false                            # turns every rule off
+    # action: managed_challenge                 # replaces every rule's action
+    categories:
+      - category: wordpress
+        action: log
+    rules:
+      - id: 7dfd111a6bad4b86bf3522cce6c5792f    # Log4j URI
+        enabled: false

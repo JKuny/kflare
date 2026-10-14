@@ -26,6 +26,7 @@
   - dnsrecords
   - iplists
   - kvnamespaces
+  - managedrulesets
   - r2buckets
   - ratelimitrules
   - tunnelconfigurations
@@ -49,6 +50,7 @@
   - dnsrecords/finalizers
   - iplists/finalizers
   - kvnamespaces/finalizers
+  - managedrulesets/finalizers
   - r2buckets/finalizers
   - ratelimitrules/finalizers
   - tunnelconfigurations/finalizers
@@ -66,6 +68,7 @@
   - dnsrecords/status
   - iplists/status
   - kvnamespaces/status
+  - managedrulesets/status
   - r2buckets/status
   - ratelimitrules/status
   - tunnelconfigurations/status

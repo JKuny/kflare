@@ -29,6 +29,7 @@ func TestConditionAccessors(t *testing.T) {
 		"WAFCustomRule":       &WAFCustomRule{},
 		"RateLimitRule":       &RateLimitRule{},
 		"IPList":              &IPList{},
+		"ManagedRuleset":      &ManagedRuleset{},
 	}
 	want := []metav1.Condition{{Type: ConditionReady, Status: metav1.ConditionTrue, Reason: "Synced"}}
 	for kind, obj := range objects {
@@ -41,7 +42,7 @@ func TestConditionAccessors(t *testing.T) {
 }
 
 func TestRulesetRuleAccessors(t *testing.T) {
-	waf, rateLimit := &WAFCustomRule{}, &RateLimitRule{}
+	waf, rateLimit, managed := &WAFCustomRule{}, &RateLimitRule{}, &ManagedRuleset{}
 	rules := map[string]struct {
 		rule interface {
 			GetRulesetRuleSpec() *RulesetRuleSpec
@@ -50,8 +51,9 @@ func TestRulesetRuleAccessors(t *testing.T) {
 		spec   *RulesetRuleSpec
 		status *RulesetRuleStatus
 	}{
-		"WAFCustomRule": {waf, &waf.Spec.RulesetRuleSpec, &waf.Status},
-		"RateLimitRule": {rateLimit, &rateLimit.Spec.RulesetRuleSpec, &rateLimit.Status},
+		"WAFCustomRule":  {waf, &waf.Spec.RulesetRuleSpec, &waf.Status},
+		"RateLimitRule":  {rateLimit, &rateLimit.Spec.RulesetRuleSpec, &rateLimit.Status},
+		"ManagedRuleset": {managed, &managed.Spec.RulesetRuleSpec, &managed.Status},
 	}
 	for kind, r := range rules {
 		if r.rule.GetRulesetRuleSpec() != r.spec || r.rule.GetRulesetRuleStatus() != r.status {
