@@ -464,7 +464,7 @@ shared machinery once; each rule CRD on top of it is mostly types plus a convers
 | `feat/ip-list-controller` | `IPList` | shared-client | ✅ Free: 1 IP list, 10,000 items |
 | `feat/zero-trust-controllers` | `AccessGroup`, `AccessPolicy`, `AccessApplication` | shared-client | Blocked: Zero Trust is not enabled on the account (a free plan exists) |
 | `feat/managed-ruleset-controller` | `ManagedRuleset` (was `WAFPackage`) | rulesets-foundation | ✅ By hand (decided 2026-10-13). Free: only the Cloudflare Free Managed Ruleset, with overrides |
-| Code generator: `feat/cloudflare-go-v7` … `feat/generator-rule-kinds` (8 PRs) | none: `kflare-gen` and the shared CRUD reconciler; KVNamespace moves onto them; the first new generated kind (see [Code generator](#code-generator-kflare-gen)) | — | **Next** (decided 2026-10-13) |
+| Code generator: `feat/cloudflare-go-v7` … `feat/generator-rule-kinds` (8 PRs) | none: `kflare-gen` and the shared CRUD reconciler; KVNamespace moves onto them; the first new generated kind (see [Code generator](#code-generator-kflare-gen)) | — | 🚧 1 of 8 done (`feat/cloudflare-go-v7`); decided 2026-10-13 |
 | `feat/managed-transform-controller` | `ManagedTransform` | zone-controller | Free: all six transforms |
 | `feat/transform-rule-controller` | `TransformRule` | code generator (rule kinds) | Generated. Free: 10 rules, no regex |
 | `feat/redirect-rule-controller` | `RedirectRule` | code generator (rule kinds) | Generated. Free: 10 rules, no regex |
@@ -529,7 +529,7 @@ permission group names; deploy.md uses the dashboard's labels, so look those up 
 
 #### SDK decision
 **Status:** Accepted 2026-10-09. Step 1 is done: kflare uses cloudflare-go **v0.119.0**. Step 3 is brought forward
-for generated kinds (2026-10-13)
+for generated kinds (2026-10-13): **v7.12.0** sits next to v0.119 since `feat/cloudflare-go-v7`
 
 kflare pinned cloudflare-go v0.89.0 until October 2026, and its gaps kept costing features. Checked 2026-10-09:
 
@@ -552,8 +552,33 @@ Decided:
    releases). Each controller already sits behind its own narrow interface, so `pkg/cloudflare.Client` can embed both
    SDKs during the move, with `errors.go` classifying both error types until it is done. Brought forward on 2026-10-13
    for the kinds the [code generator](#code-generator-kflare-gen) produces: they use v7 from the start, so
-   `feat/cloudflare-go-v7` adds v7 next to v0.119. A hand-written controller moves when v7 buys it something (R2Bucket:
-   jurisdictions and storage class), and the rule kinds move together in `feat/rulesets-v7`
+   `feat/cloudflare-go-v7` added v7 next to v0.119 (✅, see the v7 notes below). A hand-written controller moves when
+   v7 buys it something (R2Bucket: jurisdictions and storage class), and the rule kinds move together in
+   `feat/rulesets-v7`
+
+**v7 notes (`feat/cloudflare-go-v7`, v7.12.0, 2026-10-14):**
+- `pkg/cloudflare.Client` carries v7's request options (`V7Options()`): the token, Cloudflare's production base URL and
+  `http.DefaultClient`. A controller builds only the services it calls, as in
+  `kv.NewNamespaceService(client.V7Options()...)`
+- **kflare never imports v7's root package** (`github.com/cloudflare/cloudflare-go/v7`); golangci-lint's depguard
+  refuses it. Its `NewClient` applies six `CLOUDFLARE_*` environment variables to every request (another token, an API
+  key and email, a user service key, a base URL and extra headers), builds a service for every product, and gives each
+  client its own transport, which with a client per reconcile would mean a connection pool per reconcile. And
+  importing the package at all, which imports 134 of v7's other 135 packages, costs a third of the binary. Measured
+  on the manager: 50.7 MB on main, 67.9 MB when `errors.go` named the error type through the root package, 51.1 MB
+  through `kv`. So `errors.go` names it through `kv` (every v7 package re-exports it as `Error`), and
+  a param field is set as the root package's `F` would set it, which code generated from the SDK does at no cost:
+  `params.Title.Value, params.Title.Present = title, true`
+- Errors: v7 returns one type, `*cloudflare.Error`, for every error status, with `StatusCode` and `Errors[].Code`.
+  `errors.go` classifies it by status as v0's typed errors: any 4xx but 429 is terminal, 404 `IsNotFound`, 429
+  `IsRateLimit`, and `HasErrorCode` reads the codes of a 4xx other than 401, 403, 404 and 429. A connection error is
+  not a `*cloudflare.Error`, so it stays retryable. The tests get v7's errors from the SDK itself, through `httptest`
+- Retries differ, and kflare keeps each SDK's defaults: v7 retries twice (0.5 s doubling, at most 8 s, or the
+  `Retry-After` it is given) after a 408, 409, 429, 5xx or connection error; v0 retries a 429, 5xx or connection error
+  up to three times (1 s doubling, at most 30 s). The difference ends when the last controller leaves v0
+- For `feat/crud-reconciler`: v7's `Error()` reads `GET "<URL>": 404 Not Found <response body>`, too long for a
+  condition, so conditions need Cloudflare's codes and messages only, as v0 shows them. `Error()` also dereferences
+  the error's `Request` and `Response`, so a fake that returns a v7 error must fill both in
 
 **Bump notes (v0.89 → v0.119, 2026-10-12):**
 - `DNSRecord` lost `ZoneID`, `ZoneName` and `Locked`. A DNSRecord's `status.cloudflareMetadata.zoneID` now comes from
@@ -1023,7 +1048,8 @@ Each is the foundation plus typed action parameters. Together they replace Page 
 
 #### Code generator (`kflare-gen`)
 **Depends on:** `feat/shared-client`, `feat/rulesets-foundation`; eight PRs, in order
-**Status:** 🔲 Next. Planned and decided 2026-10-13
+**Status:** 🚧 In progress: PR 1 (`feat/cloudflare-go-v7`) ✅, next PR 2 (`feat/crud-reconciler`). Planned and
+decided 2026-10-13
 
 Most of a new kind is the same wiring every time. IPList (#26) changed 27 files (+2,596 lines). Besides its types and
 its bulk-operation logic, it repeated `Get/SetConditions`, registration in `cmd/main.go`, the CRD kustomization, the
@@ -1108,7 +1134,7 @@ CRD defaults, so nothing is late-initialized.
 
 ```yaml
 KVNamespace:
-  service: KV.Namespaces        # v7 client path; operations default to New/Get/Update/Delete/List
+  service: KV.Namespaces        # kv.NewNamespaceService; operations default to New/Get/Update/Delete/List
   scope: account                # accountRef, credential chain, account watch, protection entry
   shortName: cfkv
   id: {field: ID, status: namespaceID}
@@ -1122,7 +1148,7 @@ KVNamespace:
 
 | # | Branch | Change | Done when |
 |---|--------|--------|-----------|
-| 1 | `feat/cloudflare-go-v7` | v7 next to v0.119: `pkg/cloudflare.Client` holds a v7 client, and `errors.go` also classifies `*cloudflare.Error` | Unit tests pass. Nothing uses v7 yet |
+| 1 | `feat/cloudflare-go-v7` | ✅ v7.12.0 next to v0.119: `pkg/cloudflare.Client` carries v7's request options (`V7Options`), from which controllers build the services they call, and `errors.go` also classifies `*cloudflare.Error` (see the [v7 notes](#sdk-decision)) | Unit tests pass. Nothing uses v7 yet |
 | 2 | `feat/crud-reconciler` | The shared CRUD reconciler, with KVNamespace hand-ported onto it and onto v7, whose `Get` ends the list-and-match workaround | KVNamespace's specs (fake adapted) and the live e2e pass |
 | 3 | `feat/generator-types` | `generator/`: SDK loader, model, `generator.yaml`, types emitter, golden tests, `make codegen` | KVNamespace's regenerated CRD matches the hand-written one, or differs only on purpose |
 | 4 | `feat/generator-openapi` | `kflare-gen sync-spec`, the committed subset, constraints and hints | Golden tests: the constraints generated for KVNamespace, R2Bucket and IPList match their CRDs, or the entry says why not |
@@ -1150,7 +1176,8 @@ KVNamespace:
   too-strict CRD blocks valid configurations, while a loose one ends in a `TerminalError` with Cloudflare's message
 - SDK major versions rename types. Entries and hooks name SDK types, so a major bump is its own regenerate-and-review
   PR
-- Two SDKs share the binary for a while: two error families (PR 1) and two retry setups to keep consistent
+- Two SDKs share the binary for a while: two error families, classified alike since PR 1, and two retry setups, each
+  kept at its SDK's defaults (see the v7 notes)
 
 
 #### Release and CI
@@ -1276,8 +1303,8 @@ export CF_E2E_ZONE=kflare.dev               # zone for the DNS e2e specs; adopte
 ## Current Status
 
 > **Phases 1 and 2 complete. Phase 3 in progress: `KVNamespace`, `R2Bucket`, `WAFCustomRule`, `RateLimitRule`,
-> `IPList` and `ManagedRuleset` done.** cloudflare-go is at v0.119; rule kinds share the Rulesets foundation and
-> controller. Next: the code generator, `kflare-gen`, starting with `feat/cloudflare-go-v7` (see Phase 3); Zero Trust
-> still waits on account setup. Items needing a paid plan, add-on or account setup are tracked under "Deferred: paid
-> plan, add-on or account setup" in Phase 3.
+> `IPList` and `ManagedRuleset` done.** cloudflare-go is at v0.119, with v7.12.0 next to it for the generated kinds;
+> rule kinds share the Rulesets foundation and controller. The code generator, `kflare-gen`, is under way: next
+> `feat/crud-reconciler` (see Phase 3). Zero Trust still waits on account setup. Items needing a paid plan, add-on or
+> account setup are tracked under "Deferred: paid plan, add-on or account setup" in Phase 3.
 > Last updated: October 2026

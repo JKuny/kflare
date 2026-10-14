@@ -187,7 +187,8 @@ seconds once the entry point is deleted (verified live on `kflare.dev`, with a r
 | 429, 5xx, network errors | Retryable | `Ready=False` with reason `APIError`; the error is returned so controller-runtime retries with exponential back-off (5 ms doubling up to about 16 minutes per resource). |
 
 cloudflare-go names its 401 error `AuthorizationError` and its 403 error `AuthenticationError`, the reverse of what the
-names suggest; `pkg/cloudflare/errors.go` documents the mapping.
+names suggest; `pkg/cloudflare/errors.go` documents the mapping. The generated SDK, cloudflare-go v7, returns one
+error type, `*cloudflare.Error`, for every status, and `errors.go` classifies it by status in the same way.
 
 The Rulesets API reports what the zone's plan does not allow (a regular expression, the Log action, a custom block
 response in a WAF custom rule, a rate limiting period other than 10 seconds, a paid managed ruleset, more rules than the
@@ -266,8 +267,9 @@ hang, and leaves its Cloudflare object in place.
   ref marks them (see [Rules](#rules)).
 - **Rule order covers kflare's rules only.** A rule created outside kflare keeps its place, so it cannot be ordered
   relative to kflare's rules.
-- **Pinned to the legacy SDK.** kflare uses cloudflare-go v0.119, the newest of the v0 line. Some limitations come
-  from it: Tunnel renames are impossible because `UpdateTunnel` omits the tunnel ID from the request path,
+- **Pinned to the legacy SDK.** kflare's controllers use cloudflare-go v0.119, the newest of the v0 line; the
+  generated SDK, v7, is in the module for the generated kinds to come. Some limitations come from v0.119: Tunnel
+  renames are impossible because `UpdateTunnel` omits the tunnel ID from the request path,
   `originRequest` timeouts are not exposed because `TunnelDuration` does not round-trip, and R2Bucket manages buckets
   in the default jurisdiction only: the SDK cannot send the `cf-r2-jurisdiction` header, and its Worker R2 binding has
   no jurisdiction field.
