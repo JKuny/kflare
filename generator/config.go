@@ -48,6 +48,9 @@ type kindConfig struct {
 	ClaimLabel string `json:"claimLabel"`
 	// Fields adjusts fields, by their API name.
 	Fields map[string]fieldConfig `json:"fields,omitempty"`
+	// Fixed leaves out of the spec fields that kflare always sends with the
+	// same value, by their API name: an IPList's list kind is always ip.
+	Fixed map[string]string `json:"fixed,omitempty"`
 	// Ignore leaves out fields, by their API name, each with the reason.
 	Ignore map[string]string `json:"ignore,omitempty"`
 }
@@ -72,9 +75,37 @@ type fieldConfig struct {
 	Doc string `json:"doc,omitempty"`
 	// PrintColumn adds a column for the field, with this name.
 	PrintColumn string `json:"printColumn,omitempty"`
-	// MinLength and MaxLength bound a string field.
-	MinLength *int `json:"minLength,omitempty"`
-	MaxLength *int `json:"maxLength,omitempty"`
+	// Validation replaces what the OpenAPI spec says the field's value may
+	// be. The spec is not always the live API.
+	Validation *validationConfig `json:"validation,omitempty"`
+}
+
+// validationConfig replaces a field's validation, with the reason.
+type validationConfig struct {
+	// MinLength, MaxLength and Pattern bound a string field.
+	MinLength *int64 `json:"minLength,omitempty"`
+	MaxLength *int64 `json:"maxLength,omitempty"`
+	Pattern   string `json:"pattern,omitempty"`
+	// Minimum and Maximum bound an integer field.
+	Minimum *int64 `json:"minimum,omitempty"`
+	Maximum *int64 `json:"maximum,omitempty"`
+	// Reason says why the spec's validation does not do, such as what a live
+	// check found.
+	Reason string `json:"reason"`
+}
+
+// validation returns the validation v replaces a field's with.
+func (v *validationConfig) validation() validation {
+	out := validation{minLength: v.MinLength, maxLength: v.MaxLength, pattern: v.Pattern}
+	if v.Minimum != nil {
+		minimum := float64(*v.Minimum)
+		out.minimum = &minimum
+	}
+	if v.Maximum != nil {
+		maximum := float64(*v.Maximum)
+		out.maximum = &maximum
+	}
+	return out
 }
 
 var (
@@ -147,11 +178,38 @@ func (k *kindConfig) validate() error {
 		if _, ok := k.Fields[name]; ok {
 			return fmt.Errorf("%s is both ignored and adjusted in fields", name)
 		}
+		if _, ok := k.Fixed[name]; ok {
+			return fmt.Errorf("%s is both ignored and fixed", name)
+		}
+	}
+	for name := range k.Fixed {
+		if _, ok := k.Fields[name]; ok {
+			return fmt.Errorf("%s is both fixed and adjusted in fields", name)
+		}
 	}
 	for name, f := range k.Fields {
-		if f.MinLength != nil && f.MaxLength != nil && *f.MinLength > *f.MaxLength {
-			return fmt.Errorf("fields.%s: minLength is above maxLength", name)
+		if f.Validation != nil {
+			if err := f.Validation.validate(); err != nil {
+				return fmt.Errorf("fields.%s.validation: %w", name, err)
+			}
 		}
+	}
+	return nil
+}
+
+func (v *validationConfig) validate() error {
+	switch {
+	case strings.TrimSpace(v.Reason) == "":
+		return fmt.Errorf("gives no reason")
+	case v.MinLength != nil && v.MaxLength != nil && *v.MinLength > *v.MaxLength:
+		return fmt.Errorf("minLength is above maxLength")
+	case v.Minimum != nil && v.Maximum != nil && *v.Minimum > *v.Maximum:
+		return fmt.Errorf("minimum is above maximum")
+	case strings.Contains(v.Pattern, "`"):
+		return fmt.Errorf("the pattern holds a backquote, which a kubebuilder marker cannot")
+	}
+	if _, err := regexp.Compile(v.Pattern); err != nil {
+		return fmt.Errorf("the pattern does not compile: %w", err)
 	}
 	return nil
 }

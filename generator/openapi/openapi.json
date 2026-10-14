@@ -1,0 +1,1362 @@
+{
+  "components": {
+    "parameters": {
+      "r2_cf-r2-jurisdiction": {
+        "description": "Jurisdiction where objects in this bucket are guaranteed to be stored.",
+        "in": "header",
+        "name": "cf-r2-jurisdiction",
+        "schema": {
+          "default": "default",
+          "enum": [
+            "default",
+            "eu",
+            "us",
+            "fedramp",
+            "fedramp-high"
+          ],
+          "type": "string"
+        }
+      }
+    },
+    "schemas": {
+      "lists_account_id": {
+        "description": "The Account ID for this resource.",
+        "example": "023e105f4ecef8ad9ca31a8372d0c353",
+        "maxLength": 32,
+        "minLength": 32,
+        "readOnly": true,
+        "type": "string",
+        "x-auditable": true
+      },
+      "lists_api-response-common": {
+        "properties": {
+          "errors": {
+            "$ref": "#/components/schemas/lists_messages"
+          },
+          "messages": {
+            "$ref": "#/components/schemas/lists_messages"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "type": "object"
+              },
+              {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            ]
+          },
+          "success": {
+            "description": "Defines whether the API call was successful.",
+            "enum": [
+              true
+            ],
+            "example": true,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "errors",
+          "messages",
+          "result"
+        ],
+        "type": "object"
+      },
+      "lists_api-response-common-failure": {
+        "properties": {
+          "errors": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/lists_messages"
+              }
+            ],
+            "example": [
+              {
+                "code": 7003,
+                "message": "No route for the URI"
+              }
+            ],
+            "minLength": 1
+          },
+          "messages": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/lists_messages"
+              }
+            ],
+            "example": []
+          },
+          "result": {
+            "enum": [
+              null
+            ],
+            "nullable": true,
+            "type": "object"
+          },
+          "success": {
+            "description": "Defines whether the API call was successful.",
+            "enum": [
+              false
+            ],
+            "example": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "errors",
+          "messages",
+          "result"
+        ],
+        "type": "object"
+      },
+      "lists_created_on": {
+        "description": "The RFC 3339 timestamp of when the list was created.",
+        "example": "2020-01-01T08:00:00Z",
+        "readOnly": true,
+        "type": "string",
+        "x-auditable": true
+      },
+      "lists_description": {
+        "description": "An informative summary of the list.",
+        "example": "This is a note",
+        "maxLength": 500,
+        "type": "string",
+        "x-auditable": true
+      },
+      "lists_kind": {
+        "description": "The type of the list. Each type supports specific list items (IP addresses, ASNs, hostnames or redirects).",
+        "enum": [
+          "ip",
+          "redirect",
+          "hostname",
+          "asn"
+        ],
+        "example": "ip"
+      },
+      "lists_list": {
+        "properties": {
+          "created_on": {
+            "$ref": "#/components/schemas/lists_created_on"
+          },
+          "description": {
+            "$ref": "#/components/schemas/lists_description"
+          },
+          "id": {
+            "$ref": "#/components/schemas/lists_list_id"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/lists_kind"
+          },
+          "modified_on": {
+            "$ref": "#/components/schemas/lists_modified_on"
+          },
+          "name": {
+            "$ref": "#/components/schemas/lists_name"
+          },
+          "num_items": {
+            "$ref": "#/components/schemas/lists_num_items"
+          },
+          "num_referencing_filters": {
+            "$ref": "#/components/schemas/lists_num_referencing_filters"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "num_items",
+          "num_referencing_filters",
+          "created_on",
+          "modified_on"
+        ],
+        "type": "object"
+      },
+      "lists_list-response-collection": {
+        "allOf": [
+          {
+            "properties": {
+              "result": {
+                "$ref": "#/components/schemas/lists_list"
+              }
+            },
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/lists_api-response-common"
+          }
+        ],
+        "type": "object"
+      },
+      "lists_list_id": {
+        "description": "The unique ID of the list.",
+        "example": "2c0fc9fa937b11eaa1b71c4d701ab86e",
+        "maxLength": 32,
+        "minLength": 32,
+        "readOnly": true,
+        "type": "string",
+        "x-auditable": true
+      },
+      "lists_messages": {
+        "example": [],
+        "items": {
+          "properties": {
+            "code": {
+              "minimum": 1000,
+              "type": "integer"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "type": "object",
+          "uniqueItems": true
+        },
+        "type": "array"
+      },
+      "lists_modified_on": {
+        "description": "The RFC 3339 timestamp of when the list was last modified.",
+        "example": "2020-01-10T14:00:00Z",
+        "readOnly": true,
+        "type": "string",
+        "x-auditable": true
+      },
+      "lists_name": {
+        "description": "An informative name for the list. Use this name in filter and rule expressions.",
+        "example": "list1",
+        "maxLength": 50,
+        "pattern": "^[a-zA-Z0-9_]+$",
+        "type": "string",
+        "x-auditable": true
+      },
+      "lists_num_items": {
+        "description": "The number of items in the list.",
+        "example": 10,
+        "readOnly": true,
+        "type": "number",
+        "x-auditable": true
+      },
+      "lists_num_referencing_filters": {
+        "description": "The number of [filters](/api/resources/filters/) referencing the list.",
+        "example": 2,
+        "readOnly": true,
+        "type": "number",
+        "x-auditable": true
+      },
+      "r2_account_identifier": {
+        "description": "Cloudflare account ID that owns the R2 resource.",
+        "example": "023e105f4ecef8ad9ca31a8372d0c353",
+        "maxLength": 32,
+        "type": "string"
+      },
+      "r2_bucket": {
+        "description": "A single R2 bucket.",
+        "properties": {
+          "creation_date": {
+            "description": "Creation timestamp.",
+            "type": "string"
+          },
+          "jurisdiction": {
+            "$ref": "#/components/schemas/r2_jurisdiction"
+          },
+          "location": {
+            "$ref": "#/components/schemas/r2_bucket_location"
+          },
+          "name": {
+            "$ref": "#/components/schemas/r2_bucket_name"
+          },
+          "storage_class": {
+            "$ref": "#/components/schemas/r2_storage_class"
+          }
+        },
+        "type": "object"
+      },
+      "r2_bucket_location": {
+        "description": "Location of the bucket.",
+        "enum": [
+          "apac",
+          "eeur",
+          "enam",
+          "weur",
+          "wnam",
+          "oc"
+        ],
+        "type": "string",
+        "x-auditable": true,
+        "x-stainless-terraform-configurability": "computed_optional"
+      },
+      "r2_bucket_name": {
+        "description": "Name of the bucket.",
+        "example": "example-bucket",
+        "maxLength": 64,
+        "minLength": 3,
+        "pattern": "^[a-z0-9][a-z0-9-]*[a-z0-9]",
+        "type": "string",
+        "x-auditable": true
+      },
+      "r2_errors": {
+        "items": {
+          "properties": {
+            "code": {
+              "minimum": 1000,
+              "type": "integer"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "type": "object",
+          "uniqueItems": true
+        },
+        "type": "array"
+      },
+      "r2_jurisdiction": {
+        "default": "default",
+        "description": "Jurisdiction where objects in this bucket are guaranteed to be stored.",
+        "enum": [
+          "default",
+          "eu",
+          "us",
+          "fedramp",
+          "fedramp-high"
+        ],
+        "type": "string",
+        "x-auditable": true,
+        "x-stainless-param": "jurisdiction"
+      },
+      "r2_messages": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "r2_storage_class": {
+        "default": "Standard",
+        "description": "Storage class for newly uploaded objects, unless specified otherwise.",
+        "enum": [
+          "Standard",
+          "InfrequentAccess"
+        ],
+        "type": "string",
+        "x-auditable": true
+      },
+      "r2_v4_response": {
+        "properties": {
+          "errors": {
+            "$ref": "#/components/schemas/r2_errors"
+          },
+          "messages": {
+            "$ref": "#/components/schemas/r2_messages"
+          },
+          "result": {
+            "type": "object"
+          },
+          "success": {
+            "description": "Whether the API call was successful.",
+            "enum": [
+              true
+            ],
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "errors",
+          "messages",
+          "result"
+        ],
+        "type": "object"
+      },
+      "r2_v4_response_failure": {
+        "properties": {
+          "errors": {
+            "$ref": "#/components/schemas/r2_errors"
+          },
+          "messages": {
+            "$ref": "#/components/schemas/r2_messages"
+          },
+          "result": {
+            "enum": [
+              null
+            ],
+            "nullable": true,
+            "type": "object"
+          },
+          "success": {
+            "description": "Whether the API call was successful.",
+            "enum": [
+              false
+            ],
+            "example": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "errors",
+          "messages",
+          "result"
+        ],
+        "type": "object"
+      },
+      "workers-kv_api-response-common": {
+        "properties": {
+          "errors": {
+            "$ref": "#/components/schemas/workers-kv_messages"
+          },
+          "messages": {
+            "$ref": "#/components/schemas/workers-kv_messages"
+          },
+          "success": {
+            "description": "Whether the API call was successful.",
+            "enum": [
+              true
+            ],
+            "example": true,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "errors",
+          "messages"
+        ],
+        "type": "object"
+      },
+      "workers-kv_api-response-common-failure": {
+        "properties": {
+          "errors": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/workers-kv_messages"
+              }
+            ],
+            "example": [
+              {
+                "code": 7003,
+                "message": "No route for the URI"
+              }
+            ],
+            "minLength": 1
+          },
+          "messages": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/workers-kv_messages"
+              }
+            ],
+            "example": []
+          },
+          "result": {
+            "nullable": true,
+            "type": "object",
+            "x-stainless-empty-object": true
+          },
+          "success": {
+            "description": "Whether the API call was successful.",
+            "enum": [
+              false
+            ],
+            "example": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "errors",
+          "messages",
+          "result"
+        ],
+        "type": "object"
+      },
+      "workers-kv_create_namespace_body": {
+        "properties": {
+          "jurisdiction": {
+            "$ref": "#/components/schemas/workers-kv_jurisdiction"
+          },
+          "title": {
+            "$ref": "#/components/schemas/workers-kv_namespace_title"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      },
+      "workers-kv_create_rename_namespace_body": {
+        "properties": {
+          "title": {
+            "$ref": "#/components/schemas/workers-kv_namespace_title"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      },
+      "workers-kv_identifier": {
+        "description": "ID of the Cloudflare account that owns the Workers KV namespaces.",
+        "example": "023e105f4ecef8ad9ca31a8372d0c353",
+        "maxLength": 32,
+        "readOnly": true,
+        "type": "string",
+        "x-auditable": true
+      },
+      "workers-kv_jurisdiction": {
+        "description": "Specify the jurisdiction to restrict the KV namespace to durably store data within. Can only be set at namespace creation time.",
+        "enum": [
+          "eu",
+          "fedramp",
+          "us"
+        ],
+        "example": "eu",
+        "type": "string",
+        "x-auditable": true
+      },
+      "workers-kv_messages": {
+        "example": [],
+        "items": {
+          "properties": {
+            "code": {
+              "minimum": 1000,
+              "type": "integer"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "type": "object"
+        },
+        "type": "array",
+        "uniqueItems": true
+      },
+      "workers-kv_namespace": {
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/workers-kv_namespace_identifier"
+          },
+          "jurisdiction": {
+            "$ref": "#/components/schemas/workers-kv_jurisdiction"
+          },
+          "supports_url_encoding": {
+            "description": "True if keys written on the URL will be URL-decoded before storing. For example, if set to \"true\", a key written on the URL as \"%3F\" will be stored as \"?\".",
+            "example": true,
+            "readOnly": true,
+            "type": "boolean",
+            "x-auditable": true
+          },
+          "title": {
+            "$ref": "#/components/schemas/workers-kv_namespace_title"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "type": "object"
+      },
+      "workers-kv_namespace_identifier": {
+        "description": "ID of the Workers KV namespace.",
+        "example": "0f2ac74b498b48028cb68387c421e279",
+        "maxLength": 32,
+        "readOnly": true,
+        "type": "string",
+        "x-auditable": true
+      },
+      "workers-kv_namespace_title": {
+        "description": "Human-readable string name for a Workers KV namespace.",
+        "example": "My Own Namespace",
+        "maxLength": 512,
+        "type": "string",
+        "x-auditable": true
+      }
+    }
+  },
+  "info": {
+    "title": "Cloudflare API",
+    "version": "4.0.0",
+    "x-kflare-source": "https://github.com/cloudflare/api-schemas/blob/7350e99238483c77d6379e1f4217c770433a4563/openapi.json"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/accounts/{account_id}/r2/buckets": {
+      "post": {
+        "description": "Creates an R2 bucket in the account and selected jurisdiction, with an optional location hint and default storage class.",
+        "operationId": "r2-create-bucket",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/r2_account_identifier"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/r2_cf-r2-jurisdiction"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "example": "{\"name\": \"example-bucket\"}",
+                "properties": {
+                  "locationHint": {
+                    "$ref": "#/components/schemas/r2_bucket_location"
+                  },
+                  "name": {
+                    "$ref": "#/components/schemas/r2_bucket_name"
+                  },
+                  "storageClass": {
+                    "$ref": "#/components/schemas/r2_storage_class"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/r2_v4_response"
+                    },
+                    {
+                      "properties": {
+                        "result": {
+                          "$ref": "#/components/schemas/r2_bucket"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Create Bucket response."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/r2_v4_response_failure"
+                }
+              }
+            },
+            "description": "Create Bucket response failure."
+          }
+        },
+        "security": [
+          {
+            "api_token": []
+          }
+        ],
+        "summary": "Create Bucket",
+        "tags": [
+          "R2 Bucket"
+        ],
+        "x-api-token-group": [
+          "Workers R2 Storage Write"
+        ],
+        "x-fern-availability": "generally-available",
+        "x-fern-sdk-group-name": "r2.buckets",
+        "x-fern-sdk-method-name": "create"
+      }
+    },
+    "/accounts/{account_id}/r2/buckets/{bucket_name}": {
+      "get": {
+        "description": "Gets properties of an existing R2 bucket.",
+        "operationId": "r2-get-bucket",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/r2_account_identifier"
+            }
+          },
+          {
+            "in": "path",
+            "name": "bucket_name",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/r2_bucket_name"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/r2_cf-r2-jurisdiction"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/r2_v4_response"
+                    },
+                    {
+                      "properties": {
+                        "result": {
+                          "$ref": "#/components/schemas/r2_bucket"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Get Bucket response."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/r2_v4_response_failure"
+                }
+              }
+            },
+            "description": "Get Bucket response failure."
+          }
+        },
+        "security": [
+          {
+            "api_token": []
+          }
+        ],
+        "summary": "Get Bucket",
+        "tags": [
+          "R2 Bucket"
+        ],
+        "x-cfPermissionsRequired": {
+          "enum": [
+            "com.cloudflare.edge.r2.bucket.read"
+          ]
+        },
+        "x-fern-availability": "generally-available",
+        "x-fern-sdk-group-name": "r2.buckets",
+        "x-fern-sdk-method-name": "get"
+      },
+      "patch": {
+        "description": "Changes the default storage class for newly uploaded objects in an existing R2 bucket. Existing objects retain their storage class, and individual uploads can override the bucket default.",
+        "operationId": "r2-patch-bucket",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/r2_account_identifier"
+            }
+          },
+          {
+            "in": "path",
+            "name": "bucket_name",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/r2_bucket_name"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/r2_cf-r2-jurisdiction"
+          },
+          {
+            "in": "header",
+            "name": "cf-r2-storage-class",
+            "required": true,
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/r2_storage_class"
+                }
+              ],
+              "x-stainless-param": "storage_class"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/r2_v4_response"
+                    },
+                    {
+                      "properties": {
+                        "result": {
+                          "$ref": "#/components/schemas/r2_bucket"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Patch Bucket response."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/r2_v4_response_failure"
+                }
+              }
+            },
+            "description": "Get Bucket response failure."
+          }
+        },
+        "security": [
+          {
+            "api_token": []
+          }
+        ],
+        "summary": "Patch Bucket",
+        "tags": [
+          "R2 Bucket"
+        ],
+        "x-cfPermissionsRequired": {
+          "enum": [
+            "com.cloudflare.edge.r2.bucket.write"
+          ]
+        },
+        "x-fern-availability": "generally-available",
+        "x-fern-sdk-group-name": "r2.buckets",
+        "x-fern-sdk-method-name": "edit"
+      }
+    },
+    "/accounts/{account_id}/rules/lists": {
+      "post": {
+        "description": "Creates a new list of the specified kind.",
+        "operationId": "lists-create-a-list",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/lists_account_id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "description": {
+                    "$ref": "#/components/schemas/lists_description"
+                  },
+                  "kind": {
+                    "$ref": "#/components/schemas/lists_kind"
+                  },
+                  "name": {
+                    "$ref": "#/components/schemas/lists_name"
+                  }
+                },
+                "required": [
+                  "name",
+                  "kind"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/lists_list-response-collection"
+                }
+              }
+            },
+            "description": "Create a list response."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/lists_list-response-collection"
+                    },
+                    {
+                      "$ref": "#/components/schemas/lists_api-response-common-failure"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Create a list response failure."
+          }
+        },
+        "security": [
+          {
+            "api_email": [],
+            "api_key": [],
+            "api_token": []
+          }
+        ],
+        "summary": "Create a list",
+        "tags": [
+          "Lists"
+        ],
+        "x-api-token-group": [
+          "Account Filter Lists Edit"
+        ],
+        "x-cfPlanAvailability": {
+          "business": true,
+          "enterprise": true,
+          "free": true,
+          "pro": true
+        },
+        "x-fern-availability": "generally-available",
+        "x-fern-sdk-group-name": "rules.lists",
+        "x-fern-sdk-method-name": "create"
+      }
+    },
+    "/accounts/{account_id}/rules/lists/{list_id}": {
+      "get": {
+        "description": "Fetches the details of a list.",
+        "operationId": "lists-get-a-list",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "list_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/lists_list_id"
+            }
+          },
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/lists_account_id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/lists_list-response-collection"
+                }
+              }
+            },
+            "description": "Get a list response."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/lists_list-response-collection"
+                    },
+                    {
+                      "$ref": "#/components/schemas/lists_api-response-common-failure"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Get a list response failure."
+          }
+        },
+        "security": [
+          {
+            "api_email": [],
+            "api_key": [],
+            "api_token": []
+          }
+        ],
+        "summary": "Get a list",
+        "tags": [
+          "Lists"
+        ],
+        "x-api-token-group": [
+          "Account Filter Lists Read"
+        ],
+        "x-cfPlanAvailability": {
+          "business": true,
+          "enterprise": true,
+          "free": true,
+          "pro": true
+        },
+        "x-fern-availability": "generally-available",
+        "x-fern-sdk-group-name": "rules.lists",
+        "x-fern-sdk-method-name": "get"
+      },
+      "put": {
+        "description": "Updates the description of a list.",
+        "operationId": "lists-update-a-list",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "list_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/lists_list_id"
+            }
+          },
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/lists_account_id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "description": {
+                    "$ref": "#/components/schemas/lists_description"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/lists_list-response-collection"
+                }
+              }
+            },
+            "description": "Update a list response."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/lists_list-response-collection"
+                    },
+                    {
+                      "$ref": "#/components/schemas/lists_api-response-common-failure"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Update a list response failure."
+          }
+        },
+        "security": [
+          {
+            "api_email": [],
+            "api_key": [],
+            "api_token": []
+          }
+        ],
+        "summary": "Update a list",
+        "tags": [
+          "Lists"
+        ],
+        "x-api-token-group": [
+          "Account Filter Lists Edit"
+        ],
+        "x-cfPlanAvailability": {
+          "business": true,
+          "enterprise": true,
+          "free": true,
+          "pro": true
+        },
+        "x-fern-availability": "generally-available",
+        "x-fern-sdk-group-name": "rules.lists",
+        "x-fern-sdk-method-name": "update"
+      }
+    },
+    "/accounts/{account_id}/storage/kv/namespaces": {
+      "post": {
+        "description": "Creates a Workers KV namespace in the specified account with the given title. Returns `400` if the account already owns a namespace with that title; an existing namespace must be explicitly deleted before it can be replaced. An optional jurisdiction restricts where data is durably stored and can only be set at creation time.",
+        "operationId": "workers-kv-namespace-create-a-namespace",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/workers-kv_identifier"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/workers-kv_create_namespace_body"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/workers-kv_api-response-common"
+                    },
+                    {
+                      "properties": {
+                        "result": {
+                          "$ref": "#/components/schemas/workers-kv_namespace"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Create a Namespace response."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/workers-kv_api-response-common-failure"
+                }
+              }
+            },
+            "description": "Create a Namespace response failure."
+          }
+        },
+        "security": [
+          {
+            "api_token": []
+          },
+          {
+            "api_email": [],
+            "api_key": []
+          }
+        ],
+        "summary": "Create a namespace",
+        "tags": [
+          "Workers KV Namespace"
+        ],
+        "x-api-token-group": [
+          "Workers KV Storage Write"
+        ],
+        "x-fern-availability": "generally-available",
+        "x-fern-sdk-group-name": "kv.namespaces",
+        "x-fern-sdk-method-name": "create"
+      }
+    },
+    "/accounts/{account_id}/storage/kv/namespaces/{namespace_id}": {
+      "get": {
+        "description": "Returns the Workers KV namespace for the specified account and namespace ID.",
+        "operationId": "workers-kv-namespace-get-a-namespace",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespace_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/workers-kv_namespace_identifier"
+            }
+          },
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/workers-kv_identifier"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/workers-kv_api-response-common"
+                    },
+                    {
+                      "properties": {
+                        "result": {
+                          "$ref": "#/components/schemas/workers-kv_namespace"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Get a Namespace response."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/workers-kv_api-response-common-failure"
+                }
+              }
+            },
+            "description": "Get a Namespace response failure."
+          }
+        },
+        "security": [
+          {
+            "api_token": []
+          },
+          {
+            "api_email": [],
+            "api_key": []
+          }
+        ],
+        "summary": "Get a namespace",
+        "tags": [
+          "Workers KV Namespace"
+        ],
+        "x-api-token-group": [
+          "Workers KV Storage Write",
+          "Workers KV Storage Read"
+        ],
+        "x-fern-availability": "generally-available",
+        "x-fern-sdk-group-name": "kv.namespaces",
+        "x-fern-sdk-method-name": "get"
+      },
+      "put": {
+        "description": "Changes the title of the specified Workers KV namespace and returns the updated namespace. The namespace ID and stored key-value pairs are unchanged.",
+        "operationId": "workers-kv-namespace-rename-a-namespace",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "namespace_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/workers-kv_namespace_identifier"
+            }
+          },
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/workers-kv_identifier"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/workers-kv_create_rename_namespace_body"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/workers-kv_api-response-common"
+                    },
+                    {
+                      "properties": {
+                        "result": {
+                          "$ref": "#/components/schemas/workers-kv_namespace"
+                        }
+                      },
+                      "required": [
+                        "result"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Rename a Namespace response."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/workers-kv_api-response-common-failure"
+                }
+              }
+            },
+            "description": "Rename a Namespace response failure."
+          }
+        },
+        "security": [
+          {
+            "api_token": []
+          },
+          {
+            "api_email": [],
+            "api_key": []
+          }
+        ],
+        "summary": "Rename a namespace",
+        "tags": [
+          "Workers KV Namespace"
+        ],
+        "x-api-token-group": [
+          "Workers KV Storage Write"
+        ],
+        "x-fern-availability": "generally-available",
+        "x-fern-sdk-group-name": "kv.namespaces",
+        "x-fern-sdk-method-name": "update"
+      }
+    }
+  }
+}

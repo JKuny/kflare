@@ -9,7 +9,9 @@ package main
 import (
 	"fmt"
 	"go/types"
+	"maps"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -26,14 +28,29 @@ type kind struct {
 	// status.cloudflareMetadata, the ID first.
 	spec, metadata []field
 	printColumns   []printColumn
+	// fixed holds the values kflare sends for fields the spec leaves out, by
+	// API name.
+	fixed map[string]string
 }
 
 // field is one field of a generated struct.
 type field struct {
 	goName, jsonName, goType string
 	doc                      []string
-	markers                  []string
-	optional                 bool
+	optional, immutable      bool
+	validation               validation
+	enum                     []string
+	// def is the field's default, as a marker value; "" when there is none.
+	def string
+}
+
+// validation bounds a field's value: a string's length and pattern, or an
+// integer's range.
+type validation struct {
+	minLength, maxLength               *int64
+	pattern                            string
+	minimum, maximum                   *float64
+	exclusiveMinimum, exclusiveMaximum bool
 }
 
 // printColumn is one of the kind's additional printer columns.
@@ -41,20 +58,67 @@ type printColumn struct {
 	name, typ, jsonPath string
 }
 
-// typeString is a string, both as a Go type and as a print column's type.
-const typeString = "string"
+// typeString is a string, both as a Go type and as a print column's type;
+// typeInt64 is the Go type of an integer.
+const (
+	typeString = "string"
+	typeInt64  = "int64"
+)
+
+// markers returns a field's kubebuilder markers.
+func (f field) markers() []string {
+	var out []string
+	if len(f.enum) > 0 {
+		out = append(out, "+kubebuilder:validation:Enum="+strings.Join(f.enum, ";"))
+	}
+	v := f.validation
+	if v.minLength != nil {
+		out = append(out, fmt.Sprintf("+kubebuilder:validation:MinLength=%d", *v.minLength))
+	}
+	if v.maxLength != nil {
+		out = append(out, fmt.Sprintf("+kubebuilder:validation:MaxLength=%d", *v.maxLength))
+	}
+	if v.pattern != "" {
+		out = append(out, fmt.Sprintf("+kubebuilder:validation:Pattern=`%s`", v.pattern))
+	}
+	if v.minimum != nil {
+		out = append(out, "+kubebuilder:validation:Minimum="+formatNumber(*v.minimum))
+		if v.exclusiveMinimum {
+			out = append(out, "+kubebuilder:validation:ExclusiveMinimum=true")
+		}
+	}
+	if v.maximum != nil {
+		out = append(out, "+kubebuilder:validation:Maximum="+formatNumber(*v.maximum))
+		if v.exclusiveMaximum {
+			out = append(out, "+kubebuilder:validation:ExclusiveMaximum=true")
+		}
+	}
+	if f.def != "" {
+		out = append(out, "+kubebuilder:default="+f.def)
+	}
+	if f.immutable {
+		out = append(out, immutable(f.jsonName))
+	}
+	return out
+}
+
+// formatNumber writes a bound without a needless fraction.
+func formatNumber(n float64) string {
+	return strconv.FormatFloat(n, 'f', -1, 64)
+}
 
 // immutable returns the CEL rule that keeps a field as it was created.
 func immutable(jsonName string) string {
 	return fmt.Sprintf(`+kubebuilder:validation:XValidation:rule="self == oldSelf",message="%s is immutable"`, jsonName)
 }
 
-// buildKind builds the model of entry's kind from its service. Every field of
-// the service's create params and of the object it returns is placed or
-// ignored; an entry that names a field the service does not have is refused,
-// so that a misspelled name or a field an SDK bump removed shows up.
-func buildKind(entry kindConfig, svc *service) (*kind, error) {
-	b := &kindBuilder{entry: entry, svc: svc, used: map[string]bool{}}
+// buildKind builds the model of entry's kind from its service and the
+// OpenAPI spec. Every field of the service's create params and of the object
+// it returns is placed, fixed or ignored; an entry that names a field the
+// service does not have is refused, so that a misspelled name or a field an
+// SDK bump removed shows up.
+func buildKind(entry kindConfig, svc *service, spec *apiSpec) (*kind, error) {
+	b := &kindBuilder{entry: entry, svc: svc, spec: spec, used: map[string]bool{}}
 	k, err := b.build()
 	if err != nil {
 		return nil, fmt.Errorf("%s (%s): %w", entry.Kind, entry.Service, err)
@@ -65,24 +129,31 @@ func buildKind(entry kindConfig, svc *service) (*kind, error) {
 type kindBuilder struct {
 	entry kindConfig
 	svc   *service
-	// used records the entry's field and ignore names that matched a field.
+	spec  *apiSpec
+	// createProps and objectProps are the spec's properties of the create
+	// request and of the object Get returns.
+	createProps, objectProps map[string]*schema
+	// used records the entry's field, fixed and ignore names that matched a
+	// field.
 	used map[string]bool
 }
 
 func (b *kindBuilder) build() (*kind, error) {
 	e := b.entry
-	k := &kind{name: e.Kind, shortName: e.ShortName, noun: e.Noun, doc: lines(e.Doc), claimLabel: e.ClaimLabel}
-
 	if !slices.ContainsFunc(b.svc.create, isAccountID) {
 		return nil, fmt.Errorf("scope account, but New takes no account_id")
 	}
+	if err := b.loadSpec(); err != nil {
+		return nil, err
+	}
+	k := &kind{name: e.Kind, shortName: e.ShortName, noun: e.Noun, doc: lines(e.Doc), claimLabel: e.ClaimLabel,
+		fixed: map[string]string{}}
 	k.spec = append(k.spec, field{
-		goName: "AccountRef", jsonName: "accountRef", goType: "corev1.LocalObjectReference",
+		goName: "AccountRef", jsonName: "accountRef", goType: "corev1.LocalObjectReference", immutable: true,
 		doc: []string{
 			fmt.Sprintf("AccountRef references the CloudflareAccount that owns the %s.", e.Noun),
 			"Immutable after creation.",
 		},
-		markers: []string{immutable("accountRef")},
 	})
 
 	inCreate := map[string]bool{}
@@ -90,6 +161,14 @@ func (b *kindBuilder) build() (*kind, error) {
 	for _, f := range b.svc.create {
 		inCreate[f.apiName] = true
 		if isAccountID(f) {
+			continue
+		}
+		if value, ok := e.Fixed[f.apiName]; ok {
+			b.used[f.apiName] = true
+			if err := b.checkFixed(f, value); err != nil {
+				return nil, err
+			}
+			k.fixed[f.apiName] = value
 			continue
 		}
 		if b.ignored(f.apiName) {
@@ -107,7 +186,7 @@ func (b *kindBuilder) build() (*kind, error) {
 			return nil, err
 		}
 		if !b.updatable(f.apiName) {
-			out.markers = append(out.markers, immutable(out.jsonName))
+			out.immutable = true
 			if out.optional {
 				// self == oldSelf holds only while the field is set: it must
 				// not be added or removed either.
@@ -126,7 +205,56 @@ func (b *kindBuilder) build() (*kind, error) {
 		}
 	}
 
-	var statusColumns []printColumn
+	statusColumns, err := b.metadata(k, inCreate)
+	if err != nil {
+		return nil, err
+	}
+	k.printColumns = append(append(specColumns, statusColumns...),
+		printColumn{name: "Ready", typ: typeString, jsonPath: `.status.conditions[?(@.type=="Ready")].status`},
+		printColumn{name: "Age", typ: "date", jsonPath: ".metadata.creationTimestamp"})
+
+	sections := []struct {
+		name  string
+		names []string
+	}{
+		{"ignore", slices.Sorted(maps.Keys(e.Ignore))},
+		{"fixed", slices.Sorted(maps.Keys(e.Fixed))},
+		{"fields", slices.Sorted(maps.Keys(e.Fields))},
+	}
+	for _, section := range sections {
+		for _, name := range section.names {
+			if !b.used[name] {
+				return nil, fmt.Errorf("%s.%s: the service has no such field", section.name, name)
+			}
+		}
+	}
+	return k, nil
+}
+
+// loadSpec reads the spec's properties of the create request and of the
+// object Get returns.
+func (b *kindBuilder) loadSpec() error {
+	create, err := b.spec.operation(b.svc.newRoute)
+	if err != nil {
+		return err
+	}
+	if b.createProps, err = b.spec.requestProperties(create); err != nil {
+		return fmt.Errorf("%s: %w", b.svc.newRoute, err)
+	}
+	get, err := b.spec.operation(b.svc.getRoute)
+	if err != nil {
+		return err
+	}
+	if b.objectProps, err = b.spec.resultProperties(get); err != nil {
+		return fmt.Errorf("%s: %w", b.svc.getRoute, err)
+	}
+	return nil
+}
+
+// metadata adds the status fields to k: the ID, then the fields of the object
+// that the create params do not hold. It returns their print columns.
+func (b *kindBuilder) metadata(k *kind, inCreate map[string]bool) ([]printColumn, error) {
+	e := b.entry
 	id, ok := b.objectField(e.ID.Field)
 	if !ok {
 		return nil, fmt.Errorf("id.field: the object has no field %s", e.ID.Field)
@@ -145,8 +273,7 @@ func (b *kindBuilder) build() (*kind, error) {
 	if idColumn == "" {
 		idColumn = humanize(e.ID.Status)
 	}
-	statusColumns = append(statusColumns, printColumn{name: idColumn, typ: typeString,
-		jsonPath: ".status.cloudflareMetadata." + e.ID.Status})
+	columns := []printColumn{{name: idColumn, typ: typeString, jsonPath: ".status.cloudflareMetadata." + e.ID.Status}}
 	for _, f := range b.svc.object {
 		// The object's other fields that the spec sets are the spec's.
 		if f.apiName == e.ID.Field || inCreate[f.apiName] || b.ignored(f.apiName) {
@@ -157,24 +284,28 @@ func (b *kindBuilder) build() (*kind, error) {
 			return nil, err
 		}
 		k.metadata = append(k.metadata, out)
-		statusColumns = append(statusColumns, column...)
+		columns = append(columns, column...)
 	}
+	return columns, nil
+}
 
-	k.printColumns = append(append(specColumns, statusColumns...),
-		printColumn{name: "Ready", typ: typeString, jsonPath: `.status.conditions[?(@.type=="Ready")].status`},
-		printColumn{name: "Age", typ: "date", jsonPath: ".metadata.creationTimestamp"})
-
-	for name := range b.entry.Ignore {
-		if !b.used[name] {
-			return nil, fmt.Errorf("ignore.%s: the service has no such field", name)
-		}
+// checkFixed checks the value an entry fixes a field to.
+func (b *kindBuilder) checkFixed(f sdkField, value string) error {
+	if f.in != inBody || !isString(f.typ) {
+		return fmt.Errorf("fixed.%s: only a string the request body holds can be fixed", f.apiName)
 	}
-	for name := range b.entry.Fields {
-		if !b.used[name] {
-			return nil, fmt.Errorf("fields.%s: the service has no such field", name)
-		}
+	fs, err := b.fieldSpec(b.createProps, f.apiName)
+	if err != nil {
+		return err
 	}
-	return k, nil
+	enum := fs.enum
+	if enum == nil {
+		enum = f.enum
+	}
+	if enum != nil && !slices.Contains(enum, value) {
+		return fmt.Errorf("fixed.%s: %q is not one of %s", f.apiName, value, strings.Join(enum, ", "))
+	}
+	return nil
 }
 
 // ignored reports whether the entry ignores the field apiName.
@@ -200,20 +331,49 @@ func (b *kindBuilder) objectField(apiName string) (sdkField, bool) {
 	return b.svc.object[i], true
 }
 
+// fieldSpec returns what the spec says about the property apiName of props;
+// nothing when the spec does not describe it.
+func (b *kindBuilder) fieldSpec(props map[string]*schema, apiName string) (fieldSpec, error) {
+	prop, ok := props[apiName]
+	if !ok {
+		return fieldSpec{}, nil
+	}
+	fs, err := b.spec.fieldSpec(prop)
+	if err != nil {
+		return fieldSpec{}, fmt.Errorf("%s in the OpenAPI spec: %w", apiName, err)
+	}
+	return fs, nil
+}
+
 // field maps an SDK field to a field of the spec, or of
-// status.cloudflareMetadata, applying the entry's adjustments, and returns the
-// print column it asks for, if any.
+// status.cloudflareMetadata, with what the OpenAPI spec says about it and the
+// entry's adjustments, and returns the print column it asks for, if any.
 //
 // An optional spec field that is not a string is a pointer, so that unset
-// differs from false. Status fields are all optional and never pointers, and
-// carry no enum: a value Cloudflare adds to an enum must not make kflare's
-// status updates fail.
+// differs from a zero value. Status fields are all optional, never pointers,
+// and carry no validation: a value Cloudflare starts returning must not make
+// kflare's status updates fail.
 func (b *kindBuilder) field(f sdkField, spec bool) (field, []printColumn, error) {
 	adjust, adjusted := b.entry.Fields[f.apiName]
 	if adjusted {
 		b.used[f.apiName] = true
 	}
-	goType, column, err := goTypeOf(f)
+	if !spec && adjust.Validation != nil {
+		return field{}, nil, fmt.Errorf("fields.%s.validation: only spec fields are validated", f.apiName)
+	}
+	props := b.objectProps
+	if spec {
+		props = b.createProps
+	}
+	fs, err := b.fieldSpec(props, f.apiName)
+	if err != nil {
+		return field{}, nil, err
+	}
+	if fs.sensitive {
+		return field{}, nil, fmt.Errorf("%s is sensitive (x-sensitive), and kflare-gen cannot keep it in a Secret "+
+			"yet; ignore it with a reason", f.apiName)
+	}
+	goType, column, err := goTypeOf(f, fs.typ)
 	if err != nil {
 		return field{}, nil, err
 	}
@@ -224,8 +384,8 @@ func (b *kindBuilder) field(f sdkField, spec bool) (field, []printColumn, error)
 		if out.optional && goType != typeString {
 			out.goType = "*" + goType
 		}
-		if len(f.enum) > 0 {
-			out.markers = append(out.markers, "+kubebuilder:validation:Enum="+strings.Join(f.enum, ";"))
+		if err := b.specValidation(&out, f, fs, adjust.Validation); err != nil {
+			return field{}, nil, err
 		}
 	}
 	doc := adjust.Doc
@@ -233,17 +393,6 @@ func (b *kindBuilder) field(f sdkField, spec bool) (field, []printColumn, error)
 		doc = f.doc
 	}
 	out.doc = lines(doc)
-	if adjust.MinLength != nil || adjust.MaxLength != nil {
-		if goType != typeString {
-			return field{}, nil, fmt.Errorf("fields.%s: minLength and maxLength need a string field", f.apiName)
-		}
-		if adjust.MinLength != nil {
-			out.markers = append(out.markers, fmt.Sprintf("+kubebuilder:validation:MinLength=%d", *adjust.MinLength))
-		}
-		if adjust.MaxLength != nil {
-			out.markers = append(out.markers, fmt.Sprintf("+kubebuilder:validation:MaxLength=%d", *adjust.MaxLength))
-		}
-	}
 	var columns []printColumn
 	if adjust.PrintColumn != "" {
 		columns = append(columns, printColumn{name: adjust.PrintColumn, typ: column, jsonPath: parent + out.jsonName})
@@ -251,17 +400,83 @@ func (b *kindBuilder) field(f sdkField, spec bool) (field, []printColumn, error)
 	return out, columns, nil
 }
 
+// specValidation sets a spec field's enum, default and validation: the
+// spec's, or the validation the entry replaces it with.
+func (b *kindBuilder) specValidation(out *field, f sdkField, fs fieldSpec, override *validationConfig) error {
+	out.enum = fs.enum
+	if out.enum == nil {
+		out.enum = f.enum
+	}
+	if fs.def != "" {
+		if err := checkDefault(out.goType, fs.def); err != nil {
+			return fmt.Errorf("%s's default in the OpenAPI spec: %w", f.apiName, err)
+		}
+		out.def = fs.def
+	}
+	base := strings.TrimPrefix(out.goType, "*")
+	if override != nil {
+		lengths := override.MinLength != nil || override.MaxLength != nil || override.Pattern != ""
+		if lengths && base != typeString {
+			return fmt.Errorf("fields.%s.validation: lengths and patterns need a string field", f.apiName)
+		}
+		if (override.Minimum != nil || override.Maximum != nil) && base != typeInt64 {
+			return fmt.Errorf("fields.%s.validation: a range needs an integer field", f.apiName)
+		}
+		out.validation = override.validation()
+		return nil
+	}
+	// The spec's keywords that fit the field's type.
+	v := fs.validation
+	switch base {
+	case typeString:
+		out.validation = validation{minLength: v.minLength, maxLength: v.maxLength, pattern: v.pattern}
+	case typeInt64:
+		out.validation = validation{minimum: v.minimum, maximum: v.maximum,
+			exclusiveMinimum: v.exclusiveMinimum, exclusiveMaximum: v.exclusiveMaximum}
+	}
+	return nil
+}
+
+// checkDefault checks that a default fits a field's Go type.
+func checkDefault(goType, def string) error {
+	switch strings.TrimPrefix(goType, "*") {
+	case typeString:
+		if _, err := strconv.Unquote(def); err == nil {
+			return nil
+		}
+	case "bool":
+		if def == "true" || def == "false" {
+			return nil
+		}
+	case typeInt64:
+		if _, err := strconv.ParseInt(def, 10, 64); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s does not fit a %s", def, goType)
+}
+
 // goTypeOf maps an SDK field's type to a Go type for the CRD and the type of
-// its print column. Numbers are refused for now: cloudflare-go v7 types every
-// number as a float64, so only the OpenAPI spec can tell an integer, which a
-// CRD needs.
-func goTypeOf(f sdkField) (goType, column string, err error) {
+// its print column. specType is the field's type in the OpenAPI spec:
+// cloudflare-go v7 types every number as a float64, so only the spec can tell
+// an integer, which a CRD needs.
+func goTypeOf(f sdkField, specType string) (goType, column string, err error) {
 	if basic, ok := f.typ.Underlying().(*types.Basic); ok {
 		switch basic.Kind() {
 		case types.String:
 			return typeString, typeString, nil
 		case types.Bool:
 			return "bool", "boolean", nil
+		case types.Float64, types.Int64, types.Int:
+			switch specType {
+			case "integer":
+				return typeInt64, "integer", nil
+			case "number":
+				return "", "", fmt.Errorf("%s is a number that need not be whole, which a CRD cannot hold well; "+
+					"ignore it with a reason", f.apiName)
+			}
+			return "", "", fmt.Errorf("%s is a %s, and the OpenAPI spec does not say it is an integer; ignore it "+
+				"with a reason", f.apiName, f.typ)
 		}
 	}
 	return "", "", fmt.Errorf("%s is a %s, which kflare-gen cannot map yet; ignore it with a reason", f.apiName, f.typ)

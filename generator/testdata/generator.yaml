@@ -29,10 +29,55 @@ kinds:
     fields:
       name:
         printColumn: Name
-      description:
-        maxLength: 500
       created_on:
         printColumn: Created
     ignore:
-      num_items: A float64 in the SDK; only the OpenAPI spec tells it is an integer.
-      num_referencing_filters: A float64 in the SDK; only the OpenAPI spec tells it is an integer.
+      num_items: A number in the OpenAPI spec, not an integer.
+      num_referencing_filters: A number in the OpenAPI spec, not an integer.
+
+  # R2Bucket's hand-written CRD, as kflare-gen generates it: TestConstraintsMatchTheHandWrittenCRDs compares the two.
+  - kind: TestR2Bucket
+    service: r2.BucketService
+    scope: account
+    shortName: testr2
+    noun: R2 bucket
+    doc: TestR2Bucket is R2Bucket as kflare-gen generates it.
+    id:
+      field: name
+      status: bucketName
+    claimLabel: kflare.dev/test-r2-bucket-name
+    fields:
+      name:
+        validation:
+          pattern: ^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$
+          reason: >-
+            Names are 3 to 63 characters, not up to 64 as the spec says, and the spec's pattern has no end anchor, so it
+            passes a name that ends in a hyphen. Cloudflare took 63 characters and refused 64, a trailing hyphen, a
+            capital and an underscore (10005; verified live 2026-10-14).
+    ignore:
+      storageClass: Testing Infrequent Access is billed usage; see Deferred in CLAUDE.md.
+      cf-r2-jurisdiction: Jurisdictions are not supported yet; see R2Bucket in CLAUDE.md.
+
+  # IPList's hand-written CRD, as kflare-gen generates it, without the items, which are not part of the list service.
+  - kind: TestIPList
+    service: rules.ListService
+    scope: account
+    shortName: testiplist
+    noun: IP list
+    doc: TestIPList is IPList as kflare-gen generates it.
+    id:
+      field: id
+      status: listID
+    claimLabel: kflare.dev/test-ip-list-id
+    fixed:
+      kind: ip
+    fields:
+      name:
+        validation:
+          pattern: ^[a-z0-9_]{1,50}$
+          reason: >-
+            Cloudflare refuses capitals in a list name (10029; verified live 2026-10-13), which the spec's pattern
+            allows.
+    ignore:
+      num_items: A number in the OpenAPI spec, not an integer.
+      num_referencing_filters: A number in the OpenAPI spec, not an integer.

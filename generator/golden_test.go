@@ -21,6 +21,19 @@ var update = flag.Bool("update", false, "rewrite the golden files in testdata")
 // boilerplate is the license header the repository's generated files carry.
 var boilerplate = filepath.Join("..", "hack", "boilerplate.go.txt")
 
+// committedSpec is the OpenAPI subset make codegen reads.
+var committedSpec = filepath.Join("openapi", "openapi.json")
+
+// loadTestSpec loads the committed OpenAPI subset.
+func loadTestSpec(t *testing.T) *apiSpec {
+	t.Helper()
+	spec, err := loadSpec(committedSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return spec
+}
+
 // TestGolden generates the kinds of testdata/generator.yaml, each from a real
 // cloudflare-go v7 service, and compares them with their golden files.
 func TestGolden(t *testing.T) {
@@ -29,7 +42,7 @@ func TestGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	files, err := generate(cfg, sdk{dir: "."}, "// Test header.")
+	files, err := generate(cfg, sdk{dir: "."}, loadTestSpec(t), "// Test header.")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +80,7 @@ func TestCommittedTypesAreUpToDate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	files, err := generate(cfg, sdk{dir: "."}, string(header))
+	files, err := generate(cfg, sdk{dir: "."}, loadTestSpec(t), string(header))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +99,7 @@ func TestRun(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := run(filepath.Join("testdata", "generator.yaml"), dir, boilerplate); err != nil {
+	if err := run(filepath.Join("testdata", "generator.yaml"), committedSpec, dir, boilerplate); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	entries, err := os.ReadDir(dir)
@@ -98,8 +111,8 @@ func TestRun(t *testing.T) {
 		names = append(names, e.Name())
 	}
 	if want := []string{
-		"kept_types.go", "zz_generated.deepcopy.go",
-		"zz_generated.testkvnamespace_types.go", "zz_generated.testlist_types.go",
+		"kept_types.go", "zz_generated.deepcopy.go", "zz_generated.testiplist_types.go",
+		"zz_generated.testkvnamespace_types.go", "zz_generated.testlist_types.go", "zz_generated.testr2bucket_types.go",
 	}; !slices.Equal(names, want) {
 		t.Errorf("after run: %q, want %q: the stale generated file removed, the others kept", names, want)
 	}
@@ -112,13 +125,14 @@ func TestRun(t *testing.T) {
 func TestRunRefuses(t *testing.T) {
 	config := filepath.Join("testdata", "generator.yaml")
 	unknown := writeConfig(t, strings.Replace(validConfig, "kv.NamespaceService", "kv.NoSuchService", 1))
-	for name, args := range map[string][3]string{
-		"a missing configuration": {"missing.yaml", t.TempDir(), boilerplate},
-		"a missing header":        {config, t.TempDir(), "missing.txt"},
-		"an unknown service":      {unknown, t.TempDir(), boilerplate},
-		"a missing API directory": {config, filepath.Join(t.TempDir(), "missing"), boilerplate},
+	for name, args := range map[string][4]string{
+		"a missing configuration": {"missing.yaml", committedSpec, t.TempDir(), boilerplate},
+		"a missing spec":          {config, "missing.json", t.TempDir(), boilerplate},
+		"a missing header":        {config, committedSpec, t.TempDir(), "missing.txt"},
+		"an unknown service":      {unknown, committedSpec, t.TempDir(), boilerplate},
+		"a missing API directory": {config, committedSpec, filepath.Join(t.TempDir(), "missing"), boilerplate},
 	} {
-		if err := run(args[0], args[1], args[2]); err == nil {
+		if err := run(args[0], args[1], args[2], args[3]); err == nil {
 			t.Errorf("run with %s: err = nil", name)
 		}
 	}

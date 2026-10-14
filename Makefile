@@ -48,6 +48,20 @@ help: ## Display this help.
 codegen: ## Generate the API types of the kinds in generator/generator.yaml from cloudflare-go v7 (kflare-gen).
 	go run ./generator
 
+## The api-schemas commit generator/openapi comes from: the last openapi.json before the release of the
+## cloudflare-go v7 that go.mod requires (v7.12.0, 2026-10-01). Move it with the SDK.
+API_SCHEMAS_COMMIT ?= 7350e99238483c77d6379e1f4217c770433a4563
+API_SCHEMAS_URL = https://raw.githubusercontent.com/cloudflare/api-schemas/$(API_SCHEMAS_COMMIT)
+
+.PHONY: sync-spec
+sync-spec: ## Rewrite generator/openapi from Cloudflare's OpenAPI spec at API_SCHEMAS_COMMIT (downloads 27 MB).
+	@set -e; tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	curl -sSfL -o "$$tmp/openapi.json" "$(API_SCHEMAS_URL)/openapi.json"; \
+	curl -sSfL -o generator/openapi/LICENSE "$(API_SCHEMAS_URL)/LICENSE"; \
+	go run ./generator sync-spec -from "$$tmp/openapi.json" \
+		-source "https://github.com/cloudflare/api-schemas/blob/$(API_SCHEMAS_COMMIT)/openapi.json" \
+		-config generator/generator.yaml -config generator/testdata/generator.yaml
+
 .PHONY: manifests
 manifests: codegen controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases

@@ -101,7 +101,7 @@ func writeFields(b *strings.Builder, fields []field, spec bool) {
 		if spec && f.optional {
 			b.WriteString("\t// +optional\n")
 		}
-		comment(b, "\t", f.markers)
+		comment(b, "\t", f.markers())
 		tag := f.jsonName
 		if f.optional {
 			tag += ",omitempty"
