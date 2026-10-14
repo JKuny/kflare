@@ -43,26 +43,32 @@ import (
 // for example DNS records were left behind in a retained zone.
 
 // dependentKind describes one kind of resource that depends on a parent: how
-// to list it and which parents a given resource references.
+// to list it, which parents a given resource references, and an empty object
+// of the kind, to watch it with.
 type dependentKind struct {
-	kind    string
-	list    func() client.ObjectList
-	parents func(client.Object) ([]string, bool)
+	kind      string
+	list      func() client.ObjectList
+	parents   func(client.Object) ([]string, bool)
+	newObject func() client.Object
 }
 
-// dependents builds a dependentKind for objects of type T that reference the
-// parents named by refs.
-func dependents[T client.Object](kind string, list func() client.ObjectList, refs func(T) []string) dependentKind {
+// dependents builds a dependentKind for objects of type P (a *T) that
+// reference the parents named by refs.
+func dependents[T any, P interface {
+	*T
+	client.Object
+}](kind string, list func() client.ObjectList, refs func(P) []string) dependentKind {
 	return dependentKind{
 		kind: kind,
 		list: list,
 		parents: func(obj client.Object) ([]string, bool) {
-			typed, ok := obj.(T)
+			typed, ok := obj.(P)
 			if !ok {
 				return nil, false
 			}
 			return refs(typed), true
 		},
+		newObject: func() client.Object { return P(new(T)) },
 	}
 }
 

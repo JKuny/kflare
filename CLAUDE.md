@@ -173,17 +173,17 @@ Shared infrastructure that all Phase 2 controllers will use.
 - [x] `.github/workflows/e2e.yml` (manual trigger only) runs `make test-e2e`:
   - Deployment smoke test: builds the image, deploys `config/default` to kind, checks the manager pod is
     ready with no restarts
-  - Live Cloudflare specs (`test/e2e/cloudflare_test.go`, skipped without credentials): account validation,
-    Tunnel + token Secret, TunnelConfiguration, KVNamespace, R2Bucket, WorkerScript (bound to both), and an IPList
-    (items replaced in place; an idle reconcile leaves the list alone). With `CF_E2E_ZONE` also Zone adoption (always
-    `retain`), a DNSRecord (including a check that an idle reconcile does not write to Cloudflare), a WorkerRoute plus
-    exclusion route, two WAFCustomRules (a skip rule placed before a block rule by priority; an idle reconcile leaves
-    the ruleset version alone), a RateLimitRule (checked field by field, then updated in place; an idle reconcile
-    leaves it alone), a ManagedRuleset deploying the Free Managed Ruleset (overrides checked, a rule override added in
-    place; an idle reconcile leaves it alone), and a WAFCustomRule that uses the IP list (refused while the list does
-    not exist, written once it does). Then everything is deleted in one pass and Cloudflare is checked, including that
-    the managed phase's emptied entry point is gone. Everything is named
-    `kflare-e2e-<run>` (the list `kflare_e2e_<run>`) and cleaned up even on failure
+  - Live Cloudflare specs (`test/e2e/cloudflare_test.go`, skipped without credentials): account validation, Tunnel +
+    token Secret, TunnelConfiguration, KVNamespace (renamed in place), R2Bucket, WorkerScript (bound to both), and an
+    IPList (items replaced in place; an idle reconcile leaves the list alone). With `CF_E2E_ZONE` also Zone adoption
+    (always `retain`), a DNSRecord (including a check that an idle reconcile does not write to Cloudflare), a
+    WorkerRoute plus exclusion route, two WAFCustomRules (a skip rule placed before a block rule by priority; an idle
+    reconcile leaves the ruleset version alone), a RateLimitRule (checked field by field, then updated in place; an idle
+    reconcile leaves it alone), a ManagedRuleset deploying the Free Managed Ruleset (overrides checked, a rule override
+    added in place; an idle reconcile leaves it alone), and a WAFCustomRule that uses the IP list (refused while the
+    list does not exist, written once it does). Then everything is deleted in one pass and Cloudflare is checked,
+    including that the managed phase's emptied entry point is gone. Everything is named `kflare-e2e-<run>` (the list
+    `kflare_e2e_<run>`) and cleaned up even on failure
   - `KFLARE_E2E_MANAGER=external` uses an already running manager (e.g. `make run`) instead of deploying one
     (first green live run: 2026-10-05, this way, on kind-kflare-dev)
   - Needs repo secrets `CF_API_TOKEN`, `CF_ACCOUNT_ID` and variable `CF_E2E_ZONE` (`kflare.dev`, the project's
@@ -464,7 +464,7 @@ shared machinery once; each rule CRD on top of it is mostly types plus a convers
 | `feat/ip-list-controller` | `IPList` | shared-client | ✅ Free: 1 IP list, 10,000 items |
 | `feat/zero-trust-controllers` | `AccessGroup`, `AccessPolicy`, `AccessApplication` | shared-client | Blocked: Zero Trust is not enabled on the account (a free plan exists) |
 | `feat/managed-ruleset-controller` | `ManagedRuleset` (was `WAFPackage`) | rulesets-foundation | ✅ By hand (decided 2026-10-13). Free: only the Cloudflare Free Managed Ruleset, with overrides |
-| Code generator: `feat/cloudflare-go-v7` … `feat/generator-rule-kinds` (8 PRs) | none: `kflare-gen` and the shared CRUD reconciler; KVNamespace moves onto them; the first new generated kind (see [Code generator](#code-generator-kflare-gen)) | — | 🚧 1 of 8 done (`feat/cloudflare-go-v7`); decided 2026-10-13 |
+| Code generator: `feat/cloudflare-go-v7` … `feat/generator-rule-kinds` (8 PRs) | none: `kflare-gen` and the shared CRUD reconciler; KVNamespace moves onto them; the first new generated kind (see [Code generator](#code-generator-kflare-gen)) | — | 🚧 2 of 8 done (`feat/cloudflare-go-v7`, `feat/crud-reconciler`); decided 2026-10-13 |
 | `feat/managed-transform-controller` | `ManagedTransform` | zone-controller | Free: all six transforms |
 | `feat/transform-rule-controller` | `TransformRule` | code generator (rule kinds) | Generated. Free: 10 rules, no regex |
 | `feat/redirect-rule-controller` | `RedirectRule` | code generator (rule kinds) | Generated. Free: 10 rules, no regex |
@@ -576,9 +576,11 @@ Decided:
 - Retries differ, and kflare keeps each SDK's defaults: v7 retries twice (0.5 s doubling, at most 8 s, or the
   `Retry-After` it is given) after a 408, 409, 429, 5xx or connection error; v0 retries a 429, 5xx or connection error
   up to three times (1 s doubling, at most 30 s). The difference ends when the last controller leaves v0
-- For `feat/crud-reconciler`: v7's `Error()` reads `GET "<URL>": 404 Not Found <response body>`, too long for a
-  condition, so conditions need Cloudflare's codes and messages only, as v0 shows them. `Error()` also dereferences
-  the error's `Request` and `Response`, so a fake that returns a v7 error must fill both in
+- v7's `Error()` reads `GET "<URL>": 404 Not Found <response body>`, too long for a condition. Since
+  `feat/crud-reconciler`, `handleCloudflareError` writes `cfpkg.ErrorMessage(err)`, Cloudflare's messages and codes as
+  v0 shows them (`namespace not found (10013)`, or `HTTP 503 Service Unavailable` without any); the returned error keeps
+  the request line for the log. `Error()` also dereferences the error's `Request` and `Response`, so fakes build v7
+  errors with `v7APIError` (`helpers_test.go`), which fills both in
 
 **Bump notes (v0.89 → v0.119, 2026-10-12):**
 - `DNSRecord` lost `ZoneID`, `ZoneName` and `Locked`. A DNSRecord's `status.cloudflareMetadata.zoneID` now comes from
@@ -667,8 +669,9 @@ work unchanged.
 
 - [x] `api/v1alpha1/kvnamespace_types.go`: `spec.accountRef` (immutable), `spec.title` (renamed in place);
   `status.cloudflareMetadata.namespaceID`
-- [x] `internal/controller/kvnamespace_controller.go`: list → match status ID → adopt by title → create; title drift
-  corrected by rename; claims its namespace in `kflare.dev/kv-namespace-id` (`TitleConflict` otherwise)
+- [x] `internal/controller/kvnamespace_controller.go`: get by status ID → adopt by title → create; title drift
+  corrected by rename; claims its namespace in `kflare.dev/kv-namespace-id` (`TitleConflict` otherwise). Since
+  `feat/crud-reconciler` it is a `crudResourceKind` on cloudflare-go v7 (see the code generator's PR 2)
 - [x] WorkerScript binding `kvNamespaceRef` (same namespace): waits for the KVNamespace to be ready, hashes the
   resolved ID (a recreated namespace re-uploads the Worker), watches KVNamespaces
 - [x] Deletion: a KVNamespace waits for the WorkerScripts bound to it; it counts as a user of its account.
@@ -676,11 +679,13 @@ work unchanged.
 - [x] Unit/envtest tests; live e2e spec (namespace + Worker binding checked via `ListWorkerBindings`)
 
 **KVNamespace design notes (verified live):**
-- `KVNamespaceAPI` interface: `CreateWorkersKVNamespace/ListWorkersKVNamespaces/UpdateWorkersKVNamespace/
-  DeleteWorkersKVNamespace` (account-level `rc`); cloudflare-go v0 (v0.119 too) has no single-namespace read, so
-  the controller lists (the SDK pages) and matches the ID
-- Titles are unique per account (duplicate → 400, code 10014); unknown namespace ID → 404 (10013); rename (PUT)
-  keeps the ID
+- `KVNamespaceAPI` interface: cloudflare-go v7's `kv.NamespaceService` (`New/Get/List/Update/Delete`). Until
+  `feat/crud-reconciler` it was v0's, which has no single-namespace read, so the controller listed every namespace and
+  matched the ID
+- Titles are unique per account (duplicate → 400, code 10014); unknown namespace ID → 404 (10013) for GET, PUT and
+  DELETE; rename (PUT) keeps the ID and returns the renamed namespace. The list takes `per_page` up to 1,000 (more:
+  400, code 10008) and returns an empty page past the end; v7's page type keeps only `page` and `per_page` of the
+  result info. Verified through v7 on 2026-10-14
 - Cloudflare deletes a namespace a Worker is bound to and leaves the binding dangling; every later upload of that
   Worker fails with 10041 "KV namespace not found". Hence the deletion ordering
 - Needs the account-level **Workers KV Storage: Edit** permission
@@ -1048,8 +1053,8 @@ Each is the foundation plus typed action parameters. Together they replace Page 
 
 #### Code generator (`kflare-gen`)
 **Depends on:** `feat/shared-client`, `feat/rulesets-foundation`; eight PRs, in order
-**Status:** 🚧 In progress: PR 1 (`feat/cloudflare-go-v7`) ✅, next PR 2 (`feat/crud-reconciler`). Planned and
-decided 2026-10-13
+**Status:** 🚧 In progress: PRs 1 (`feat/cloudflare-go-v7`) and 2 (`feat/crud-reconciler`) ✅, next PR 3
+(`feat/generator-types`). Planned and decided 2026-10-13
 
 Most of a new kind is the same wiring every time. IPList (#26) changed 27 files (+2,596 lines). Besides its types and
 its bulk-operation logic, it repeated `Get/SetConditions`, registration in `cmd/main.go`, the CRD kustomization, the
@@ -1149,7 +1154,7 @@ KVNamespace:
 | # | Branch | Change | Done when |
 |---|--------|--------|-----------|
 | 1 | `feat/cloudflare-go-v7` | ✅ v7.12.0 next to v0.119: `pkg/cloudflare.Client` carries v7's request options (`V7Options`), from which controllers build the services they call, and `errors.go` also classifies `*cloudflare.Error` (see the [v7 notes](#sdk-decision)) | Unit tests pass. Nothing uses v7 yet |
-| 2 | `feat/crud-reconciler` | The shared CRUD reconciler, with KVNamespace hand-ported onto it and onto v7, whose `Get` ends the list-and-match workaround | KVNamespace's specs (fake adapted) and the live e2e pass |
+| 2 | `feat/crud-reconciler` | ✅ The shared CRUD reconciler, with KVNamespace hand-ported onto it and onto v7, whose `Get` ends the list-and-match workaround (see the notes below the table) | KVNamespace's specs (fake adapted) and the live e2e pass |
 | 3 | `feat/generator-types` | `generator/`: SDK loader, model, `generator.yaml`, types emitter, golden tests, `make codegen` | KVNamespace's regenerated CRD matches the hand-written one, or differs only on purpose |
 | 4 | `feat/generator-openapi` | `kflare-gen sync-spec`, the committed subset, constraints and hints | Golden tests: the constraints generated for KVNamespace, R2Bucket and IPList match their CRDs, or the entry says why not |
 | 5 | `feat/generator-controllers` | The controller emitter: descriptor, conversions, drift, RBAC, registration, protection, sample, envtest table | KVNamespace is fully generated and its hand port deleted; its specs and the live e2e pass |
@@ -1157,6 +1162,15 @@ KVNamespace:
 | 7 | `feat/rulesets-v7` | The Rulesets foundation on v7: `Phases.Get`, `Rulesets.New` and `Rules.New/Edit/Delete` (with positions) replace the `Raw` calls in `pkg/cloudflare/rulesets.go`; the rule kinds' conversions move to v7 | Rule specs and the live e2e pass, with the rule delete checked live again (v0.119's fails) |
 | 8 | `feat/generator-rule-kinds` | A rule-kind emitter: the action parameters' types from v7's rule variants (`rulesets.RewriteRuleParam` and siblings) and the `definition` conversion, with `TransformRule` as its first kind | `TransformRule`'s live e2e passes. The other four Rules kinds follow, one PR each |
 
+- **The shared CRUD reconciler as built** (`feat/crud-reconciler`, 2026-10-14): `crudResourceKind[O, A, R]` (the API
+  type, the narrow v7 interface, the Cloudflare object) holds the kind's name and noun, its constructors, accessors
+  (`accountRef`, adoption `key`, `statusID`, `observe`; `id`, `objectKey`, `matches` on the object), the claim label and
+  conflict reason, one function per call (`get`, `list` for one page, `create`, `update`, `delete`) and its
+  `dependents`. `crudResourceReconciler` runs the loop, pages through the list for adoption (`findInPages`: from page
+  1, until a page is empty or shorter than the `per_page` Cloudflare reports) and watches the account and the deletion
+  of each dependent kind (`dependentKind.newObject`). A kind's exported reconciler only builds it, as the rule kinds
+  do. Account-scoped kinds only, for now; deletion blockers (`BucketNotEmpty`, `ListInUse`) come with the first kind
+  that needs one. Hand-written, the KVNamespace descriptor is about 70 lines: what PR 5 generates
 - `TransformRule` goes first because the dev token can already write its phases. Its immutable `spec.type` picks one
   of three phases, so the foundation's one phase per kind becomes a function of the spec
 - **Later:** a runtime for settings-style singletons (the shape of TunnelConfiguration and ManagedTransform; the 90
@@ -1304,7 +1318,8 @@ export CF_E2E_ZONE=kflare.dev               # zone for the DNS e2e specs; adopte
 
 > **Phases 1 and 2 complete. Phase 3 in progress: `KVNamespace`, `R2Bucket`, `WAFCustomRule`, `RateLimitRule`,
 > `IPList` and `ManagedRuleset` done.** cloudflare-go is at v0.119, with v7.12.0 next to it for the generated kinds;
-> rule kinds share the Rulesets foundation and controller. The code generator, `kflare-gen`, is under way: next
-> `feat/crud-reconciler` (see Phase 3). Zero Trust still waits on account setup. Items needing a paid plan, add-on or
-> account setup are tracked under "Deferred: paid plan, add-on or account setup" in Phase 3.
+> rule kinds share the Rulesets foundation and controller; KVNamespace runs on v7 and the shared CRUD reconciler. The
+> code generator, `kflare-gen`, is under way: next `feat/generator-types` (see Phase 3). Zero Trust still waits on
+> account setup. Items needing a paid plan, add-on or account setup are tracked under "Deferred: paid plan, add-on or
+> account setup" in Phase 3.
 > Last updated: October 2026

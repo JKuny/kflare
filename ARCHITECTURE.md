@@ -28,7 +28,9 @@ Zone's CloudflareAccount, and the account's token Secret. Nothing caches a token
 Secret takes effect on the next reconcile.
 
 Each controller declares a narrow interface over the Cloudflare SDK (for example `DNSRecordAPI`) holding only the calls it
-makes. The production client (`pkg/cloudflare.Client`) embeds the SDK and satisfies all of them; tests inject fakes.
+makes. The production client (`pkg/cloudflare.Client`) embeds cloudflare-go v0 and satisfies all of them, except
+`KVNamespaceAPI`: that one is part of cloudflare-go v7's KV namespace service, built from the client's v7 options. Tests
+inject fakes.
 
 ## The reconcile loop
 
@@ -43,6 +45,10 @@ Every controller follows the same shape:
    [Adoption and ownership](#adoption-and-ownership)).
 5. Compare the spec with what Cloudflare reported, and write to Cloudflare only when they differ.
 6. Record IDs and metadata in status and set `Ready=True`.
+
+KVNamespace runs this loop through the shared CRUD reconciler (`internal/controller/crudresource_controller.go`), as the
+kinds the code generator produces will: the kind only describes its Cloudflare calls, its adoption key, what it compares
+and what depends on it.
 
 Step 5 is deliberate: an idle reconcile makes read calls only. The live e2e suite checks this for DNSRecord,
 WAFCustomRule, RateLimitRule, ManagedRuleset and IPList, and TunnelConfiguration's comparison ignores fields Cloudflare
@@ -188,7 +194,9 @@ seconds once the entry point is deleted (verified live on `kflare.dev`, with a r
 
 cloudflare-go names its 401 error `AuthorizationError` and its 403 error `AuthenticationError`, the reverse of what the
 names suggest; `pkg/cloudflare/errors.go` documents the mapping. The generated SDK, cloudflare-go v7, returns one
-error type, `*cloudflare.Error`, for every status, and `errors.go` classifies it by status in the same way.
+error type, `*cloudflare.Error`, for every status, and `errors.go` classifies it by status in the same way. A condition
+gives Cloudflare's messages and codes, such as `namespace not found (10013)`, for both SDKs (`cfpkg.ErrorMessage`); the
+returned error, which controller-runtime logs, also names the request.
 
 The Rulesets API reports what the zone's plan does not allow (a regular expression, the Log action, a custom block
 response in a WAF custom rule, a rate limiting period other than 10 seconds, a paid managed ruleset, more rules than the

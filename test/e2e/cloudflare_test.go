@@ -239,7 +239,7 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		Expect(cfConfig.Config.Ingress[1].Service).To(Equal("http_status:404"))
 	})
 
-	It("creates a KVNamespace", func() {
+	It("creates a KVNamespace and renames it in place", func() {
 		kv := &cloudflarev1alpha1.KVNamespace{
 			ObjectMeta: objectMeta(kvKey),
 			Spec: cloudflarev1alpha1.KVNamespaceSpec{
@@ -252,6 +252,20 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		kvNamespaceID = kv.Status.CloudflareMetadata.NamespaceID
 
 		Expect(kvNamespaces(ctx, cfAPI, accountRC)).To(HaveKeyWithValue(kvNamespaceID, resourceName()))
+
+		By("changing the title, which renames the namespace and keeps its ID")
+		patch := client.MergeFrom(kv.DeepCopy())
+		kv.Spec.Title = resourceName() + "-renamed"
+		Expect(k8s.Patch(ctx, kv, patch)).To(Succeed())
+		Eventually(func(g Gomega) {
+			g.Expect(k8s.Get(ctx, kvKey, kv)).To(Succeed())
+			ready := meta.FindStatusCondition(kv.Status.Conditions, cloudflarev1alpha1.ConditionReady)
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(ready.ObservedGeneration).To(Equal(kv.Generation), "the rename is not reconciled yet")
+			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue), "%s: %s", ready.Reason, ready.Message)
+		}, e2eTimeout, e2ePoll).Should(Succeed())
+		Expect(kv.Status.CloudflareMetadata.NamespaceID).To(Equal(kvNamespaceID))
+		Expect(kvNamespaces(ctx, cfAPI, accountRC)).To(HaveKeyWithValue(kvNamespaceID, resourceName()+"-renamed"))
 	})
 
 	It("creates an R2Bucket", func() {
