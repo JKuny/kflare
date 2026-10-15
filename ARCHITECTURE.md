@@ -28,9 +28,9 @@ Zone's CloudflareAccount, and the account's token Secret. Nothing caches a token
 Secret takes effect on the next reconcile.
 
 Each controller declares a narrow interface over the Cloudflare SDK (for example `DNSRecordAPI`) holding only the calls it
-makes. The production client (`pkg/cloudflare.Client`) embeds cloudflare-go v0 and satisfies all of them, except
-`KVNamespaceAPI`: that one is part of cloudflare-go v7's KV namespace service, built from the client's v7 options. Tests
-inject fakes.
+makes. The production client (`pkg/cloudflare.Client`) embeds cloudflare-go v0 and satisfies all of them, except those of
+the generated kinds, such as `KVNamespaceAPI`: each is part of a cloudflare-go v7 service, built from the client's v7
+options. Tests inject fakes.
 
 ## The reconcile loop
 
@@ -46,10 +46,13 @@ Every controller follows the same shape:
 5. Compare the spec with what Cloudflare reported, and write to Cloudflare only when they differ.
 6. Record IDs and metadata in status and set `Ready=True`.
 
-KVNamespace runs this loop through the shared CRUD reconciler (`internal/controller/crudresource_controller.go`), as the
-kinds the code generator produces will: the kind only describes its Cloudflare calls, its adoption key, what it compares
-and what depends on it. Its API types are generated too, by kflare-gen from `generator/generator.yaml` and cloudflare-go
-v7 (`api/v1alpha1/zz_generated.kvnamespace_types.go`).
+The kinds kflare-gen generates, KVNamespace so far, run this loop through the shared CRUD reconciler
+(`internal/controller/crudresource_controller.go`). A generated kind only describes its Cloudflare calls, its adoption
+key, what it compares and what depends on it. kflare-gen writes that description from the kind's entry in
+`generator/generator.yaml`, cloudflare-go v7 and Cloudflare's OpenAPI spec: its API types
+(`api/v1alpha1/zz_generated.<kind>_types.go`), its controller (`internal/controller/zz_generated.<kind>.go`), and a
+table of envtest specs that the shared CRUD specs run on (`zz_generated.<kind>_test.go`). The generated kinds register
+together (`SetupGeneratedReconcilers`), and each counts as a user of its CloudflareAccount.
 
 Step 5 is deliberate: an idle reconcile makes read calls only. The live e2e suite checks this for DNSRecord,
 WAFCustomRule, RateLimitRule, ManagedRuleset and IPList, and TunnelConfiguration's comparison ignores fields Cloudflare
@@ -246,12 +249,13 @@ resource that still needs its parent for its own cleanup. Parents therefore keep
 `Ready=False` with reason `InUse` and the resources they wait for, until their dependents are gone
 (`internal/controller/protection.go`):
 
-- A `CloudflareAccount` waits for the Zones, Tunnels, WorkerScripts, KVNamespaces, R2Buckets and IPLists that reference
-  it.
+- A `CloudflareAccount` waits for the Zones, Tunnels, WorkerScripts, R2Buckets and IPLists that reference it, and for
+  the resources of every generated kind, KVNamespaces among them.
 - A `Zone` waits for its DNSRecords, WorkerRoutes, WAFCustomRules, RateLimitRules and ManagedRulesets.
 - A `Tunnel` waits for its TunnelConfigurations.
 - A `KVNamespace` waits for the WorkerScripts bound to it through `kvNamespaceRef`. Cloudflare deletes a namespace a
-  Worker is bound to, but every later upload of that Worker then fails.
+  Worker is bound to, but every later upload of that Worker then fails. (Its entry in `generator/generator.yaml` lists
+  the dependent kind and the hand-written function that finds the namespaces a WorkerScript binds.)
 - An `R2Bucket` waits for the WorkerScripts bound to it through `r2BucketRef`, for the same reason: Cloudflare deletes a
   bucket a Worker is bound to, then refuses every upload of that Worker (code 10085, verified live).
 - The account's token Secret carries `kflare.dev/token-protection` until no `CloudflareAccount` references it.

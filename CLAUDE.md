@@ -83,7 +83,7 @@ With:
 ├── test/e2e/              # Deployment smoke test against kind (make test-e2e)
 ├── local/                 # kind cluster setup for running the controller with make run
 ├── helm/kflare/           # Helm chart; templates/crds and files/manager-rules.yaml generated (make helm)
-├── generator/             # kflare-gen: generator.yaml, SDK and OpenAPI readers, types emitter (make codegen)
+├── generator/             # kflare-gen: generator.yaml, SDK and OpenAPI readers, emitters (make codegen)
 ├── hack/                  # sync-helm-chart.sh and the license header
 ├── docs/deploy.md         # Deploy guide (Helm install, accounts, upgrade, uninstall, troubleshooting)
 ├── ARCHITECTURE.md        # How the controllers behave: drift, adoption, errors, deletion, known limitations
@@ -465,7 +465,7 @@ shared machinery once; each rule CRD on top of it is mostly types plus a convers
 | `feat/ip-list-controller` | `IPList` | shared-client | ✅ Free: 1 IP list, 10,000 items |
 | `feat/zero-trust-controllers` | `AccessGroup`, `AccessPolicy`, `AccessApplication` | shared-client | Blocked: Zero Trust is not enabled on the account (a free plan exists) |
 | `feat/managed-ruleset-controller` | `ManagedRuleset` (was `WAFPackage`) | rulesets-foundation | ✅ By hand (decided 2026-10-13). Free: only the Cloudflare Free Managed Ruleset, with overrides |
-| Code generator: `feat/cloudflare-go-v7` … `feat/generator-rule-kinds` (8 PRs) | none: `kflare-gen` and the shared CRUD reconciler; KVNamespace moves onto them; the first new generated kind (see [Code generator](#code-generator-kflare-gen)) | — | 🚧 4 of 8 done (`feat/cloudflare-go-v7` … `feat/generator-openapi`); decided 2026-10-13 |
+| Code generator: `feat/cloudflare-go-v7` … `feat/generator-rule-kinds` (8 PRs) | none: `kflare-gen` and the shared CRUD reconciler; KVNamespace moves onto them; the first new generated kind (see [Code generator](#code-generator-kflare-gen)) | — | 🚧 5 of 8 done (`feat/cloudflare-go-v7` … `feat/generator-controllers`); decided 2026-10-13 |
 | `feat/managed-transform-controller` | `ManagedTransform` | zone-controller | Free: all six transforms |
 | `feat/transform-rule-controller` | `TransformRule` | code generator (rule kinds) | Generated. Free: 10 rules, no regex |
 | `feat/redirect-rule-controller` | `RedirectRule` | code generator (rule kinds) | Generated. Free: 10 rules, no regex |
@@ -673,12 +673,14 @@ work unchanged.
   (`zz_generated.kvnamespace_types.go`, from its `generator/generator.yaml` entry)
 - [x] `internal/controller/kvnamespace_controller.go`: get by status ID → adopt by title → create; title drift
   corrected by rename; claims its namespace in `kflare.dev/kv-namespace-id` (`TitleConflict` otherwise). Since
-  `feat/crud-reconciler` it is a `crudResourceKind` on cloudflare-go v7 (see the code generator's PR 2)
+  `feat/crud-reconciler` it is a `crudResourceKind` on cloudflare-go v7 (see the code generator's PR 2), and since
+  `feat/generator-controllers` it is generated (`zz_generated.kvnamespace.go`)
 - [x] WorkerScript binding `kvNamespaceRef` (same namespace): waits for the KVNamespace to be ready, hashes the
   resolved ID (a recreated namespace re-uploads the Worker), watches KVNamespaces
 - [x] Deletion: a KVNamespace waits for the WorkerScripts bound to it; it counts as a user of its account.
   Deleting it deletes the data unless `retain`
-- [x] Unit/envtest tests; live e2e spec (namespace + Worker binding checked via `ListWorkerBindings`)
+- [x] Unit/envtest tests; live e2e spec (namespace + Worker binding checked via `ListWorkerBindings`). Since
+  `feat/generator-controllers` the specs are generated, but for the WorkerScript ordering (`kvnamespace_test.go`)
 
 **KVNamespace design notes (verified live):**
 - `KVNamespaceAPI` interface: cloudflare-go v7's `kv.NamespaceService` (`New/Get/List/Update/Delete`). Until
@@ -1058,8 +1060,9 @@ Each is the foundation plus typed action parameters. Together they replace Page 
 
 #### Code generator (`kflare-gen`)
 **Depends on:** `feat/shared-client`, `feat/rulesets-foundation`; eight PRs, in order
-**Status:** 🚧 In progress: PRs 1 to 4 (`feat/cloudflare-go-v7`, `feat/crud-reconciler`, `feat/generator-types`,
-`feat/generator-openapi`) ✅, next PR 5 (`feat/generator-controllers`). Planned and decided 2026-10-13
+**Status:** 🚧 In progress: PRs 1 to 5 (`feat/cloudflare-go-v7`, `feat/crud-reconciler`, `feat/generator-types`,
+`feat/generator-openapi`, `feat/generator-controllers`) ✅, next PR 6 (the first new generated kind). Planned and decided
+2026-10-13
 
 Most of a new kind is the same wiring every time. IPList (#26) changed 27 files (+2,596 lines). Besides its types and
 its bulk-operation logic, it repeated `Get/SetConditions`, registration in `cmd/main.go`, the CRD kustomization, the
@@ -1102,8 +1105,9 @@ CRD defaults, so nothing is late-initialized.
 
 - **Inputs:**
   - `generator/generator.yaml`, one entry per kind: kind, short name and noun, the v7 service, scope, doc, ID and
-    claim label, field adjustments (doc, print column, and a `validation` that replaces the spec's, with the reason),
-    fixed values and ignored fields with their reasons; PR 5 adds the adoption key and conflict reason
+    claim label, the field resources adopt objects by, the kinds that depend on it, sample values, field adjustments
+    (doc, print column, and a `validation` that replaces the spec's, with the reason), fixed values and ignored fields
+    with their reasons
   - v7's Go types, loaded with `go/packages` at the version in `go.mod`, so the generated glue is type-checked
     against the SDK it calls
   - A subset of the OpenAPI spec under `generator/openapi/`: the operations and schemas the configured kinds use,
@@ -1131,9 +1135,11 @@ CRD defaults, so nothing is late-initialized.
   - `api/v1alpha1/zz_generated.<kind>_types.go`: spec, status, list, markers, print columns, `Get/SetConditions`
   - `internal/controller/zz_generated.<kind>.go`: the narrow v7 interface, spec → create and update params, response →
     status, the drift comparison, RBAC markers and the kind's descriptor
-  - Registration (`cmd/main.go` makes one call for every generated kind), protection entries, the CRD kustomization,
-    the Helm `edit` role and a sample
-  - An envtest table per kind: the lifecycle specs above and the immutability cases
+  - `internal/controller/zz_generated_kinds.go`: registration (`cmd/main.go` calls `SetupGeneratedReconcilers` once)
+    and the kinds' entries as users of their account; the kinds' lines in the CRD kustomization and the Helm `edit`
+    role, between `+kflare-gen:begin` and `+kflare-gen:end`; and a sample in `config/samples`
+  - `internal/controller/zz_generated.<kind>_test.go`: an envtest table per kind, for the lifecycle specs above and the
+    immutability and validation cases (`crudresource_specs_test.go`)
 - **Shared CRUD reconciler** (hand-written, `crudresource_controller.go`, the counterpart of
   `rulesetrule_controller.go`): ARCHITECTURE.md's reconcile loop for any kind a `crudResourceKind` describes, with
   adoption by key and claim labels (`claimedIDs`/`claimID`), recreation after a 404, writes only on drift, the retain
@@ -1149,11 +1155,17 @@ kinds:
     service: kv.NamespaceService      # <v7 package>.<service type>: its New, Get and Update (or Edit) give the fields
     scope: account                    # account_id → an immutable accountRef
     shortName: cfkv
-    noun: KV namespace                # in docs, and in PR 5's messages
+    noun: KV namespace                # in docs and messages
     doc: |
       KVNamespace is the Schema for the kvnamespaces API. ...
     id: {field: id, status: namespaceID}
     claimLabel: kflare.dev/kv-namespace-id
+    adopt: {by: title}                # a resource adopts the account's object with its title (TitleConflict if taken)
+    dependents:                       # the kinds that use it: it waits for them before it is deleted
+      - kind: WorkerScript
+        refs: boundKVNamespaces       # a hand-written function: the KVNamespaces a WorkerScript binds
+        reason: Cloudflare deletes a namespace a Worker is bound to, but every later upload of that Worker then fails.
+    sample: {title: example-kv}       # the sample's spec, which the generated specs start from
     fields:
       title:                          # keys are the API's field names
         printColumn: Title
@@ -1171,7 +1183,7 @@ kinds:
 | 2 | `feat/crud-reconciler` | ✅ The shared CRUD reconciler, with KVNamespace hand-ported onto it and onto v7, whose `Get` ends the list-and-match workaround (see the notes below the table) | KVNamespace's specs (fake adapted) and the live e2e pass |
 | 3 | `feat/generator-types` | ✅ `generator/`: SDK loader, model, `generator.yaml`, types emitter, golden tests, `make codegen` (see the notes below the table) | KVNamespace's regenerated CRD matches the hand-written one, or differs only on purpose |
 | 4 | `feat/generator-openapi` | ✅ `kflare-gen sync-spec`, the committed subset, constraints and hints (see the notes below the table) | Golden tests: the constraints generated for KVNamespace, R2Bucket and IPList match their CRDs, or the entry says why not |
-| 5 | `feat/generator-controllers` | The controller emitter: descriptor, conversions, drift, RBAC, registration, protection, sample, envtest table | KVNamespace is fully generated and its hand port deleted; its specs and the live e2e pass |
+| 5 | `feat/generator-controllers` | ✅ The controller emitter: descriptor, conversions, drift, RBAC, registration, protection, sample, envtest table (see the notes below the table) | KVNamespace is fully generated and its hand port deleted; its specs and the live e2e pass |
 | 6 | `feat/<kind>-controller` | The first new kind, generated end to end (decision 4) | Only its entry, any hooks and its live e2e spec are hand-written |
 | 7 | `feat/rulesets-v7` | The Rulesets foundation on v7: `Phases.Get`, `Rulesets.New` and `Rules.New/Edit/Delete` (with positions) replace the `Raw` calls in `pkg/cloudflare/rulesets.go`; the rule kinds' conversions move to v7 | Rule specs and the live e2e pass, with the rule delete checked live again (v0.119's fails) |
 | 8 | `feat/generator-rule-kinds` | A rule-kind emitter: the action parameters' types from v7's rule variants (`rulesets.RewriteRuleParam` and siblings) and the `definition` conversion, with `TransformRule` as its first kind | `TransformRule`'s live e2e passes. The other four Rules kinds follow, one PR each |
@@ -1214,6 +1226,30 @@ kinds:
   verified live: R2 names 3–63 characters, anchored (the spec: up to 64, unanchored), list names without capitals, and
   a KV title of at least one character. `TestCommittedSubsetReproduces` runs sync-spec on the subset itself and gets
   it back byte for byte
+- **kflare-gen's controllers as built** (`feat/generator-controllers`, 2026-10-14): for each kind, kflare-gen writes
+  the controller (`internal/controller/zz_generated.<kind>.go`: the narrow interface over the service's New, Get,
+  List, Update or Edit, and Delete, the reconciler and its RBAC markers, and the `crudResourceKind`), an envtest table
+  (`zz_generated.<kind>_test.go`: a fake of the service on `fakeCRUDStore`, the sample's spec, and edits of it) and
+  a sample (`config/samples`). `zz_generated_kinds.go` registers the kinds (`SetupGeneratedReconcilers`, which
+  `cmd/main.go` calls) and adds them to `accountDependents`, whose kinds the CloudflareAccount controller now watches
+  in a loop. `make codegen` also keeps the kinds' lines in `config/crd/kustomization.yaml` and the Helm `edit` role,
+  between `+kflare-gen:begin` and `+kflare-gen:end`, and removes the files it wrote for a kind no longer listed. New
+  entry keys: `adopt.by` (a required string field Get reports; the conflict reason is its Go name and `Conflict`),
+  `dependents` (a kind and a hand-written function returning the names a dependent uses, with the reason) and
+  `sample` (values for every required field, and any string the specs must change; checked against the field's
+  validation). The page size of the adoption list is the maximum of List's `per_page` in the OpenAPI spec, so the
+  subset now holds List's operation too (KV: 1,000, as verified live). `crudresource_specs_test.go` runs the shared
+  specs on each table: the finalizer, credentials, creation with every field, the claim, an idle reconcile that
+  writes nothing, adoption from a later page and its conflict, recreation, each field updated in place, errors,
+  deletion and retain, setup, the account watch, and the CRD (each immutable field; values below or above a length,
+  outside an enum, out of range). A spec field is compared only when Update takes it; an optional one only when the
+  resource sets it, so kflare never fights Cloudflare over a value it fills in, but it does not clear a value
+  removed from the spec either: telling the two apart (`computed_optional`) waits for the first kind with optional
+  fields. kflare-gen refuses what the shared CRUD reconciler cannot drive yet, saying why: New, Get and Update
+  returning different types (custom lists), a List that is not a `V4PagePaginationArray` of Get's object (R2 buckets;
+  D1 databases and Turnstile widgets list another type than Get returns, so PR 6 starts there), Get, List or Delete
+  params it does not set, and Update params it does not send. `TestGoldenControllerCompiles` type-checks the golden
+  controller and table of a second kind in `internal/controller`
 - `TransformRule` goes first because the dev token can already write its phases. Its immutable `spec.type` picks one
   of three phases, so the foundation's one phase per kind becomes a function of the spec
 - **Later:** a runtime for settings-style singletons (the shape of TunnelConfiguration and ManagedTransform; the 90
@@ -1307,10 +1343,11 @@ kinds:
 ## Development Commands
 
 ```bash
-# Generate CRDs and deepcopy functions (both run make codegen first: kflare-gen's API types)
+# Generate CRDs and deepcopy functions (both run make codegen first: kflare-gen's kinds)
 make generate manifests
 
-# Generate only kflare-gen's API types, from generator/generator.yaml, cloudflare-go v7 and generator/openapi
+# Generate only kflare-gen's kinds (API types, controllers, envtest tables, samples, registration), from
+# generator/generator.yaml, cloudflare-go v7 and generator/openapi
 make codegen
 
 # Rewrite generator/openapi from Cloudflare's OpenAPI spec at API_SCHEMAS_COMMIT (after adding a kind or moving the SDK)
@@ -1367,8 +1404,8 @@ export CF_E2E_ZONE=kflare.dev               # zone for the DNS e2e specs; adopte
 
 > **Phases 1 and 2 complete. Phase 3 in progress: `KVNamespace`, `R2Bucket`, `WAFCustomRule`, `RateLimitRule`, `IPList`
 > and `ManagedRuleset` done.** cloudflare-go is at v0.119, with v7.12.0 next to it for the generated kinds; rule kinds
-> share the Rulesets foundation and controller; KVNamespace runs on v7 and the shared CRUD reconciler, and its API types
-> are generated. The code generator, `kflare-gen`, is under way: next `feat/generator-controllers` (see Phase 3). Zero
+> share the Rulesets foundation and controller; KVNamespace runs on v7 and the shared CRUD reconciler, and is generated
+> in full. The code generator, `kflare-gen`, is under way: next the first new generated kind (see Phase 3). Zero
 > Trust still waits on account setup. Items needing a paid plan, add-on or account setup are tracked under "Deferred:
 > paid plan, add-on or account setup" in Phase 3.
 > Last updated: October 2026

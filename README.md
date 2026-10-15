@@ -132,7 +132,7 @@ From k9s, type `:cloudflareaccounts` to browse CRs, or `:secrets` to inspect the
 ## Building
 
 ```sh
-# Generate the API types kflare-gen builds from cloudflare-go v7 (make codegen), then CRDs and deepcopy functions
+# Generate the kinds kflare-gen builds from cloudflare-go v7 (make codegen), then CRDs and deepcopy functions
 make generate manifests
 
 # Build the controller binary
