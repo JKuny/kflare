@@ -11,7 +11,7 @@ import (
 	"slices"
 	"strings"
 
-	cf "github.com/cloudflare/cloudflare-go"
+	"github.com/cloudflare/cloudflare-go/v7/rulesets"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -57,10 +57,10 @@ const managedRulesetConflictCode = 20014
 // example when a ManagedRuleset is replaced by one with another name.
 var managedRulesetKind = rulesetRuleKind{
 	name:      "ManagedRuleset",
-	phase:     string(cf.RulesetPhaseHTTPRequestFirewallManaged),
+	phase:     rulesets.PhaseHTTPRequestFirewallManaged,
 	newObject: func() rulesetRuleObject { return &cloudflarev1alpha1.ManagedRuleset{} },
 	newList:   func() client.ObjectList { return &cloudflarev1alpha1.ManagedRulesetList{} },
-	definition: func(obj rulesetRuleObject) cf.RulesetRule {
+	definition: func(obj rulesetRuleObject) rulesets.RulesetNewParamsRule {
 		return managedRulesetDefinition(obj.(*cloudflarev1alpha1.ManagedRuleset))
 	},
 	conflicts: map[int]string{managedRulesetConflictCode: "RulesetConflict"},
@@ -88,44 +88,71 @@ func (r *ManagedRulesetReconciler) rules() *rulesetRuleReconciler {
 }
 
 // managedRulesetDefinition is the Cloudflare rule a ManagedRuleset asks for:
-// an execute rule for its managed ruleset, with its overrides. Cloudflare
-// keeps the category and rule overrides in the order it is sent them, so they
-// are sorted: reordering them in the spec changes nothing. The version is
+// an execute rule for its managed ruleset, with its overrides. The version is
 // left out, which Cloudflare records as the latest; it refuses any other.
-func managedRulesetDefinition(deployment *cloudflarev1alpha1.ManagedRuleset) cf.RulesetRule {
+func managedRulesetDefinition(deployment *cloudflarev1alpha1.ManagedRuleset) rulesets.RulesetNewParamsRule {
 	spec := deployment.Spec
-	params := &cf.RulesetRuleActionParameters{ID: spec.RulesetID}
-	if overrides := spec.Overrides; overrides != nil {
-		params.Overrides = &cf.RulesetRuleActionParametersOverrides{
-			Enabled: overrides.Enabled,
-			Action:  string(overrides.Action),
-		}
-		for _, category := range overrides.Categories {
-			params.Overrides.Categories = append(params.Overrides.Categories, cf.RulesetRuleActionParametersCategories{
-				Category: category.Category,
-				Action:   string(category.Action),
-				Enabled:  category.Enabled,
-			})
-		}
-		slices.SortFunc(params.Overrides.Categories, func(a, b cf.RulesetRuleActionParametersCategories) int {
+	var params rulesets.ExecuteRuleActionParametersParam
+	params.ID.Value, params.ID.Present = spec.RulesetID, true
+	if spec.Overrides != nil {
+		params.Overrides.Value, params.Overrides.Present = managedRulesetOverrides(*spec.Overrides), true
+	}
+	definition := rulesetRuleDefinition(rulesets.RulesetNewParamsRulesActionExecute, spec.RulesetRuleSpec)
+	definition.ActionParameters.Value, definition.ActionParameters.Present = params, true
+	return definition
+}
+
+// managedRulesetOverrides are a deployment's overrides as Cloudflare takes
+// them. Cloudflare keeps the category and rule overrides in the order it is
+// sent them, so they are sorted: reordering them in the spec changes nothing.
+// An override's enabled and action are sent only when set.
+func managedRulesetOverrides(
+	overrides cloudflarev1alpha1.ManagedRulesetOverrides,
+) rulesets.ExecuteRuleActionParametersOverridesParam {
+	var params rulesets.ExecuteRuleActionParametersOverridesParam
+	if overrides.Enabled != nil {
+		params.Enabled.Value, params.Enabled.Present = *overrides.Enabled, true
+	}
+	if overrides.Action != "" {
+		params.Action.Value, params.Action.Present = string(overrides.Action), true
+	}
+
+	sortedCategories := slices.SortedFunc(slices.Values(overrides.Categories),
+		func(a, b cloudflarev1alpha1.ManagedRulesetCategoryOverride) int {
 			return strings.Compare(a.Category, b.Category)
 		})
-		for _, rule := range overrides.Rules {
-			params.Overrides.Rules = append(params.Overrides.Rules, cf.RulesetRuleActionParametersRules{
-				ID:      rule.ID,
-				Action:  string(rule.Action),
-				Enabled: rule.Enabled,
-			})
+	categories := make([]rulesets.ExecuteRuleActionParametersOverridesCategoryParam, 0, len(sortedCategories))
+	for _, override := range sortedCategories {
+		var category rulesets.ExecuteRuleActionParametersOverridesCategoryParam
+		category.Category.Value, category.Category.Present = override.Category, true
+		if override.Enabled != nil {
+			category.Enabled.Value, category.Enabled.Present = *override.Enabled, true
 		}
-		slices.SortFunc(params.Overrides.Rules, func(a, b cf.RulesetRuleActionParametersRules) int {
-			return strings.Compare(a.ID, b.ID)
-		})
+		if override.Action != "" {
+			category.Action.Value, category.Action.Present = string(override.Action), true
+		}
+		categories = append(categories, category)
 	}
-	return cf.RulesetRule{
-		Action:           string(cf.RulesetRuleActionExecute),
-		ActionParameters: params,
-		Expression:       spec.Expression,
-		Description:      spec.Description,
-		Enabled:          cf.BoolPtr(spec.Enabled == nil || *spec.Enabled),
+	if len(categories) > 0 {
+		params.Categories.Value, params.Categories.Present = categories, true
 	}
+
+	sortedRules := slices.SortedFunc(slices.Values(overrides.Rules),
+		func(a, b cloudflarev1alpha1.ManagedRulesetRuleOverride) int { return strings.Compare(a.ID, b.ID) })
+	rules := make([]rulesets.ExecuteRuleActionParametersOverridesRuleParam, 0, len(sortedRules))
+	for _, override := range sortedRules {
+		var rule rulesets.ExecuteRuleActionParametersOverridesRuleParam
+		rule.ID.Value, rule.ID.Present = override.ID, true
+		if override.Enabled != nil {
+			rule.Enabled.Value, rule.Enabled.Present = *override.Enabled, true
+		}
+		if override.Action != "" {
+			rule.Action.Value, rule.Action.Present = string(override.Action), true
+		}
+		rules = append(rules, rule)
+	}
+	if len(rules) > 0 {
+		params.Rules.Value, params.Rules.Present = rules, true
+	}
+	return params
 }

@@ -8,8 +8,9 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 
-	cf "github.com/cloudflare/cloudflare-go"
+	"github.com/cloudflare/cloudflare-go/v7/rulesets"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -19,7 +20,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	cloudflarev1alpha1 "github.com/JonathanGraniero/kflare/api/v1alpha1"
-	cfpkg "github.com/JonathanGraniero/kflare/pkg/cloudflare"
 )
 
 var _ = Describe("defaultRulesetRuleAPI", func() {
@@ -28,10 +28,12 @@ var _ = Describe("defaultRulesetRuleAPI", func() {
 		Expect(err).To(HaveOccurred())
 	})
 
-	It("returns the production client for a token", func() {
+	It("returns cloudflare-go v7's rulesets services for a token", func() {
 		api, err := defaultRulesetRuleAPI("token")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(api).To(BeAssignableToTypeOf(&cfpkg.Client{}))
+		Expect(api.Phases).To(BeAssignableToTypeOf(&rulesets.PhaseService{}))
+		Expect(api.Rulesets).To(BeAssignableToTypeOf(&rulesets.RulesetService{}))
+		Expect(api.Rules).To(BeAssignableToTypeOf(&rulesets.RuleService{}))
 	})
 })
 
@@ -93,52 +95,41 @@ var _ = Describe("WAFCustomRule mapper", func() {
 })
 
 var _ = DescribeTable("the Cloudflare rule a WAFCustomRule asks for",
-	func(spec cloudflarev1alpha1.WAFCustomRuleSpec, want cf.RulesetRule) {
-		spec.Expression = `http.request.uri.path eq "/a"`
-		want.Expression = spec.Expression
-		Expect(wafCustomRuleDefinition(&cloudflarev1alpha1.WAFCustomRule{Spec: spec})).To(Equal(want))
+	func(spec cloudflarev1alpha1.WAFCustomRuleSpec, want string) {
+		spec.Expression = "true"
+		Expect(json.Marshal(wafCustomRuleDefinition(&cloudflarev1alpha1.WAFCustomRule{Spec: spec}))).To(MatchJSON(want))
 	},
 	Entry("a block rule, enabled by default",
 		cloudflarev1alpha1.WAFCustomRuleSpec{
 			RulesetRuleSpec: cloudflarev1alpha1.RulesetRuleSpec{Description: "block /a"},
 			Action:          "block",
 		},
-		cf.RulesetRule{Action: "block", Description: "block /a", Enabled: cf.BoolPtr(true)}),
+		`{"action":"block","expression":"true","description":"block /a","enabled":true}`),
 	Entry("a disabled challenge",
 		cloudflarev1alpha1.WAFCustomRuleSpec{
-			RulesetRuleSpec: cloudflarev1alpha1.RulesetRuleSpec{Enabled: cf.BoolPtr(false)},
+			RulesetRuleSpec: cloudflarev1alpha1.RulesetRuleSpec{Enabled: new(false)},
 			Action:          "managed_challenge",
 		},
-		cf.RulesetRule{Action: "managed_challenge", Enabled: cf.BoolPtr(false)}),
+		`{"action":"managed_challenge","expression":"true","enabled":false}`),
 	Entry("a skip of the remaining rules, logged by default",
 		cloudflarev1alpha1.WAFCustomRuleSpec{
 			Action: "skip",
 			Skip:   &cloudflarev1alpha1.WAFCustomRuleSkip{RemainingRules: true},
 		},
-		cf.RulesetRule{
-			Action:           "skip",
-			Enabled:          cf.BoolPtr(true),
-			ActionParameters: &cf.RulesetRuleActionParameters{Ruleset: "current"},
-			Logging:          &cf.RulesetRuleLogging{Enabled: cf.BoolPtr(true)},
-		}),
+		`{"action":"skip","expression":"true","enabled":true,"action_parameters":{"ruleset":"current"},
+		  "logging":{"enabled":true}}`),
 	Entry("a skip of phases and products, sorted, without logging",
 		cloudflarev1alpha1.WAFCustomRuleSpec{
 			Action: "skip",
 			Skip: &cloudflarev1alpha1.WAFCustomRuleSkip{
 				Phases:   []cloudflarev1alpha1.WAFCustomRuleSkipPhase{"http_request_sbfm", "http_ratelimit"},
 				Products: []cloudflarev1alpha1.WAFCustomRuleSkipProduct{"zoneLockdown", "bic"},
-				Log:      cf.BoolPtr(false),
+				Log:      new(false),
 			},
 		},
-		cf.RulesetRule{
-			Action:  "skip",
-			Enabled: cf.BoolPtr(true),
-			ActionParameters: &cf.RulesetRuleActionParameters{
-				Phases:   []string{"http_ratelimit", "http_request_sbfm"},
-				Products: []string{"bic", "zoneLockdown"},
-			},
-			Logging: &cf.RulesetRuleLogging{Enabled: cf.BoolPtr(false)},
-		}),
+		`{"action":"skip","expression":"true","enabled":true,
+		  "action_parameters":{"phases":["http_ratelimit","http_request_sbfm"],"products":["bic","zoneLockdown"]},
+		  "logging":{"enabled":false}}`),
 	Entry("a block with a custom response",
 		cloudflarev1alpha1.WAFCustomRuleSpec{
 			Action: "block",
@@ -146,13 +137,7 @@ var _ = DescribeTable("the Cloudflare rule a WAFCustomRule asks for",
 				StatusCode: 429, ContentType: "application/json", Content: `{"error":"blocked"}`,
 			},
 		},
-		cf.RulesetRule{
-			Action:  "block",
-			Enabled: cf.BoolPtr(true),
-			ActionParameters: &cf.RulesetRuleActionParameters{
-				Response: &cf.RulesetRuleActionParametersBlockResponse{
-					StatusCode: 429, ContentType: "application/json", Content: `{"error":"blocked"}`,
-				},
-			},
-		}),
+		`{"action":"block","expression":"true","enabled":true,
+		  "action_parameters":{"response":{"status_code":429,"content_type":"application/json",
+		                                   "content":"{\"error\":\"blocked\"}"}}}`),
 )

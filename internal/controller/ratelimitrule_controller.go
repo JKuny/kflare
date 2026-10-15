@@ -10,7 +10,7 @@ import (
 	"context"
 	"slices"
 
-	cf "github.com/cloudflare/cloudflare-go"
+	"github.com/cloudflare/cloudflare-go/v7/rulesets"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -46,10 +46,10 @@ const rateLimitColoCharacteristic = "cf.colo.id"
 // rateLimitRuleKind describes RateLimitRule to the shared rule reconciler.
 var rateLimitRuleKind = rulesetRuleKind{
 	name:      "RateLimitRule",
-	phase:     string(cf.RulesetPhaseHTTPRatelimit),
+	phase:     rulesets.PhaseHTTPRatelimit,
 	newObject: func() rulesetRuleObject { return &cloudflarev1alpha1.RateLimitRule{} },
 	newList:   func() client.ObjectList { return &cloudflarev1alpha1.RateLimitRuleList{} },
-	definition: func(obj rulesetRuleObject) cf.RulesetRule {
+	definition: func(obj rulesetRuleObject) rulesets.RulesetNewParamsRule {
 		return rateLimitRuleDefinition(obj.(*cloudflarev1alpha1.RateLimitRule))
 	},
 }
@@ -80,43 +80,46 @@ func (r *RateLimitRuleReconciler) rules() *rulesetRuleReconciler {
 // cf.colo.id goes first and the others are sorted: reordering them in the
 // spec changes nothing. The mitigation timeout defaults to the period, never
 // to Cloudflare's own default: a rule without one throttles, which only
-// Enterprise plans may do. An explicit 0 asks for exactly that, and
-// cloudflare-go leaves a 0 out of the request.
-func rateLimitRuleDefinition(rule *cloudflarev1alpha1.RateLimitRule) cf.RulesetRule {
+// Enterprise plans may do. An explicit 0 asks for exactly that, and is left
+// out of the request, which Cloudflare reads as 0. An empty counting
+// expression and requests to origin when false are left out too, as Cloudflare
+// returns them (verified live).
+//
+// v7 has a rate limit type for each action, all alike; the block rule's
+// serves every action.
+func rateLimitRuleDefinition(rule *cloudflarev1alpha1.RateLimitRule) rulesets.RulesetNewParamsRule {
 	spec := rule.Spec
-	var characteristics []string
+	characteristics := []string{rateLimitColoCharacteristic}
 	for _, characteristic := range spec.Characteristics {
 		if characteristic != rateLimitColoCharacteristic {
 			characteristics = append(characteristics, string(characteristic))
 		}
 	}
-	slices.Sort(characteristics)
+	slices.Sort(characteristics[1:])
 	mitigationTimeout := spec.Period
 	if spec.MitigationTimeout != nil {
 		mitigationTimeout = *spec.MitigationTimeout
 	}
-	definition := cf.RulesetRule{
-		Action:      spec.Action,
-		Expression:  spec.Expression,
-		Description: spec.Description,
-		Enabled:     cf.BoolPtr(spec.Enabled == nil || *spec.Enabled),
-		RateLimit: &cf.RulesetRuleRateLimit{
-			Characteristics:    append([]string{rateLimitColoCharacteristic}, characteristics...),
-			Period:             int(spec.Period),
-			RequestsPerPeriod:  int(spec.RequestsPerPeriod),
-			MitigationTimeout:  int(mitigationTimeout),
-			CountingExpression: spec.CountingExpression,
-			RequestsToOrigin:   spec.RequestsToOrigin,
-		},
+	var ratelimit rulesets.BlockRuleRatelimitParam
+	ratelimit.Characteristics.Value, ratelimit.Characteristics.Present = characteristics, true
+	ratelimit.Period.Value, ratelimit.Period.Present = int64(spec.Period), true
+	ratelimit.RequestsPerPeriod.Value, ratelimit.RequestsPerPeriod.Present = int64(spec.RequestsPerPeriod), true
+	if mitigationTimeout != 0 {
+		ratelimit.MitigationTimeout.Value, ratelimit.MitigationTimeout.Present = int64(mitigationTimeout), true
 	}
+	if spec.CountingExpression != "" {
+		ratelimit.CountingExpression.Value, ratelimit.CountingExpression.Present = spec.CountingExpression, true
+	}
+	if spec.RequestsToOrigin {
+		ratelimit.RequestsToOrigin.Value, ratelimit.RequestsToOrigin.Present = true, true
+	}
+
+	definition := rulesetRuleDefinition(rulesets.RulesetNewParamsRulesAction(spec.Action), spec.RulesetRuleSpec)
+	definition.Ratelimit.Value, definition.Ratelimit.Present = ratelimit, true
 	if response := spec.BlockResponse; response != nil {
-		definition.ActionParameters = &cf.RulesetRuleActionParameters{
-			Response: &cf.RulesetRuleActionParametersBlockResponse{
-				StatusCode:  uint16(response.StatusCode),
-				ContentType: response.ContentType,
-				Content:     response.Content,
-			},
-		}
+		definition.ActionParameters.Value = blockResponseParameters(response.StatusCode, response.ContentType,
+			response.Content)
+		definition.ActionParameters.Present = true
 	}
 	return definition
 }

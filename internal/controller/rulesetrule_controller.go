@@ -13,7 +13,7 @@ import (
 	"slices"
 	"time"
 
-	cf "github.com/cloudflare/cloudflare-go"
+	"github.com/cloudflare/cloudflare-go/v7/rulesets"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
@@ -56,13 +56,13 @@ type rulesetRuleKind struct {
 	// name is the kind's name. It is part of the ref of every rule of the kind.
 	name string
 	// phase is the Rulesets phase the kind's rules are in.
-	phase     string
+	phase     rulesets.Phase
 	newObject func() rulesetRuleObject
 	newList   func() client.ObjectList
 	// definition returns the rule a resource of the kind asks for, without
 	// its ref. It sets every field the rule should have: an update replaces
-	// the whole rule.
-	definition func(rulesetRuleObject) cf.RulesetRule
+	// the whole rule. rulesetRuleDefinition starts it.
+	definition func(rulesetRuleObject) rulesets.RulesetNewParamsRule
 	// conflicts maps the Cloudflare error codes that mean another rule holds
 	// something the kind's rule needs to the condition reason to report. A
 	// resource that gets one checks again every minute instead of failing:
@@ -145,13 +145,14 @@ func (r *rulesetRuleReconciler) reconcile(ctx context.Context, req ctrl.Request)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	ref := rulesetRuleRef(r.kind.name, obj.GetNamespace(), obj.GetName())
 	rule := r.kind.definition(obj)
-	rule.Ref = rulesetRuleRef(r.kind.name, obj.GetNamespace(), obj.GetName())
+	rule.Ref.Value, rule.Ref.Present = ref, true
 	state, err := syncRulesetRule(ctx, cfAPI, zoneID, r.kind.phase, rule, peers)
 	if reason, ok := r.kind.conflict(err); ok {
 		return notReadyRetryAfter(ctx, r.Client, obj, &conditionError{
 			Reason:  reason,
-			Message: fmt.Sprintf("Cloudflare refused the rule: %v", err),
+			Message: "Cloudflare refused the rule: " + cfpkg.ErrorMessage(err),
 		})
 	}
 	if err != nil {
@@ -168,7 +169,7 @@ func (r *rulesetRuleReconciler) reconcile(ctx context.Context, req ctrl.Request)
 		ZoneID:    zoneID,
 		RulesetID: state.rulesetID,
 		RuleID:    state.ruleID,
-		Ref:       rule.Ref,
+		Ref:       ref,
 		Version:   state.version,
 	}
 	if err := updateReady(ctx, r.Client, obj, "Synced", "Rule is synced with Cloudflare"); err != nil {
@@ -417,8 +418,44 @@ func (r *rulesetRuleReconciler) rulesForZone(ctx context.Context, zone client.Ob
 	return reqs
 }
 
-// defaultRulesetRuleAPI is the production factory: it delegates to cfpkg.New
-// so that the returned *cfpkg.Client satisfies RulesetRuleAPI.
+// defaultRulesetRuleAPI is the production factory: cloudflare-go v7's
+// rulesets services, with the token of a cfpkg.Client.
 func defaultRulesetRuleAPI(token string) (RulesetRuleAPI, error) {
-	return cfpkg.New(token)
+	client, err := cfpkg.New(token)
+	if err != nil {
+		return RulesetRuleAPI{}, err
+	}
+	service := rulesets.NewRulesetService(client.V7Options()...)
+	return RulesetRuleAPI{Phases: service.Phases, Rulesets: service, Rules: service.Rules}, nil
+}
+
+// rulesetRuleDefinition starts the rule a resource asks for: action, and the
+// fields every rule kind's spec holds. It always says whether the rule is
+// enabled, since an update that leaves it out enables the rule, and leaves
+// out an empty description, which Cloudflare stores as none. The kind adds
+// its action's parameters.
+func rulesetRuleDefinition(
+	action rulesets.RulesetNewParamsRulesAction, spec cloudflarev1alpha1.RulesetRuleSpec,
+) rulesets.RulesetNewParamsRule {
+	var rule rulesets.RulesetNewParamsRule
+	rule.Action.Value, rule.Action.Present = action, true
+	rule.Expression.Value, rule.Expression.Present = spec.Expression, true
+	if spec.Description != "" {
+		rule.Description.Value, rule.Description.Present = spec.Description, true
+	}
+	rule.Enabled.Value, rule.Enabled.Present = spec.Enabled == nil || *spec.Enabled, true
+	return rule
+}
+
+// blockResponseParameters are the action parameters of a block rule that
+// answers with its own response. WAF custom rules and rate limiting rules
+// both take one.
+func blockResponseParameters(statusCode int32, contentType, content string) rulesets.BlockRuleActionParametersParam {
+	var response rulesets.BlockRuleActionParametersResponseParam
+	response.StatusCode.Value, response.StatusCode.Present = int64(statusCode), true
+	response.ContentType.Value, response.ContentType.Present = contentType, true
+	response.Content.Value, response.Content.Present = content, true
+	var params rulesets.BlockRuleActionParametersParam
+	params.Response.Value, params.Response.Present = response, true
+	return params
 }

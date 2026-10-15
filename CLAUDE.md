@@ -466,7 +466,7 @@ shared machinery once; each rule CRD on top of it is mostly types plus a convers
 | `feat/ip-list-controller` | `IPList` | shared-client | ✅ Free: 1 IP list, 10,000 items |
 | `feat/zero-trust-controllers` | `AccessGroup`, `AccessPolicy`, `AccessApplication` | shared-client | Blocked: Zero Trust is not enabled on the account (a free plan exists) |
 | `feat/managed-ruleset-controller` | `ManagedRuleset` (was `WAFPackage`) | rulesets-foundation | ✅ By hand (decided 2026-10-13). Free: only the Cloudflare Free Managed Ruleset, with overrides |
-| Code generator: `feat/cloudflare-go-v7` … `feat/generator-rule-kinds` (8 PRs) | none: `kflare-gen` and the shared CRUD reconciler; KVNamespace moves onto them; the first new generated kind (see [Code generator](#code-generator-kflare-gen)) | — | 🚧 6 of 8 done (`feat/cloudflare-go-v7` … `feat/d1-database-controller`); decided 2026-10-13 |
+| Code generator: `feat/cloudflare-go-v7` … `feat/generator-rule-kinds` (8 PRs) | none: `kflare-gen` and the shared CRUD reconciler; KVNamespace moves onto them; the first new generated kind (see [Code generator](#code-generator-kflare-gen)) | — | 🚧 7 of 8 done (`feat/cloudflare-go-v7` … `feat/rulesets-v7`); decided 2026-10-13 |
 | `feat/d1-database-controller` | `D1Database` | code generator (PR 6) | ✅ Generated end to end. Free: 10 databases, 500 MB each, 5 GB in total |
 | `feat/managed-transform-controller` | `ManagedTransform` | zone-controller | Free: all six transforms |
 | `feat/transform-rule-controller` | `TransformRule` | code generator (rule kinds) | Generated. Free: 10 rules, no regex |
@@ -533,7 +533,8 @@ permission group names; deploy.md uses the dashboard's labels, so look those up 
 
 #### SDK decision
 **Status:** Accepted 2026-10-09. Step 1 is done: kflare uses cloudflare-go **v0.119.0**. Step 3 is brought forward
-for generated kinds (2026-10-13): **v7.12.0** sits next to v0.119 since `feat/cloudflare-go-v7`
+for generated kinds (2026-10-13): **v7.12.0** sits next to v0.119 since `feat/cloudflare-go-v7`, and the rule kinds use
+it since `feat/rulesets-v7`
 
 kflare pinned cloudflare-go v0.89.0 until October 2026, and its gaps kept costing features. Checked 2026-10-09:
 
@@ -551,14 +552,15 @@ Decided:
    below
 2. **Fill the remaining gaps with `API.Raw`** wrappers in `pkg/cloudflare`. ✅ For rulesets (`feat/rulesets-foundation`):
    rule create, edit, move and delete. v0's `cf.RulesetRule` and `cf.Ruleset` types already model rules, and `Raw`
-   returns the same typed errors as every other call. Still open: R2 jurisdictions
+   returns the same typed errors as every other call. v7's rulesets services replaced them in `feat/rulesets-v7`. Still
+   open: R2 jurisdictions
 3. **Move to the generated SDK later, controller by controller** (Phase 4, or sooner if the v0 line stops getting
    releases). Each controller already sits behind its own narrow interface, so `pkg/cloudflare.Client` can embed both
    SDKs during the move, with `errors.go` classifying both error types until it is done. Brought forward on 2026-10-13
    for the kinds the [code generator](#code-generator-kflare-gen) produces: they use v7 from the start, so
    `feat/cloudflare-go-v7` added v7 next to v0.119 (✅, see the v7 notes below). A hand-written controller moves when
-   v7 buys it something (R2Bucket: jurisdictions and storage class), and the rule kinds move together in
-   `feat/rulesets-v7`
+   v7 buys it something (R2Bucket: jurisdictions and storage class), and the rule kinds moved together in
+   `feat/rulesets-v7` (✅)
 
 **v7 notes (`feat/cloudflare-go-v7`, v7.12.0, 2026-10-14):**
 - `pkg/cloudflare.Client` carries v7's request options (`V7Options()`): the token, Cloudflare's production base URL and
@@ -751,8 +753,9 @@ creation, idle sync, placement, reordering, drift, deletion), and `WAFCustomRule
 - [x] `pkg/cloudflare/rulesets.go`: `CreateRulesetRule`, `UpdateRulesetRule`, `MoveRulesetRule` (position only) and
   `DeleteRulesetRule` on `*Client`, through `API.Raw`; each returns the updated `cf.Ruleset`. The delete replaces
   cloudflare-go's, which fails on the live API (it expects an empty 204; Cloudflare answers 200 with the ruleset).
-  Unit tests against `httptest`
-- [x] `internal/controller/rulesetrule.go` (interface `RulesetRuleAPI`):
+  Unit tests against `httptest`. Since `feat/rulesets-v7`, cloudflare-go v7's rulesets services make these calls and
+  the file is gone (see the code generator's notes)
+- [x] `internal/controller/rulesetrule.go` (`RulesetRuleAPI`):
   - `syncRulesetRule(zoneID, phase, rule, peers)`: gets the phase's entry point. On 404 it creates it holding the
     rule (`kind: zone`, name `default`); on 400 code 20217 (another resource created it first) it reads it again.
     It finds the rule by ref: missing → POST, placed among its peers; different → PATCH the whole rule; same → no
@@ -795,7 +798,7 @@ creation, idle sync, placement, reordering, drift, deletion), and `WAFCustomRule
 - Unknown rule → 404, code 10002 (PATCH and DELETE); unknown ruleset → 404, code 10001; over the plan's quota → 400,
   code 50001 (also for a single-rule POST)
 - cloudflare-go v0.119's `DeleteRulesetRule` deletes the rule, then returns an untyped error: it treats the response
-  body as a failure
+  body as a failure. v7's `Rules.Delete` reads it (live, 2026-10-15)
 
 **Rulesets facts (dry runs on `kflare.dev`, 2026-10-09; nothing written):**
 - `kflare.dev` has no zone entry point in any phase: `GET .../rulesets/phases/{phase}/entrypoint` returns 404, code
@@ -957,7 +960,7 @@ An account-level custom IP list, for expressions such as `ip.src in $office_ips`
 
 Deploys a Cloudflare managed ruleset to a zone, with overrides, through an `execute` rule in the
 `http_request_firewall_managed` phase. Built by hand on the v0.119 foundation (decided 2026-10-13), not generated;
-`feat/rulesets-v7` later moves its conversion to v7 with the other rule kinds.
+`feat/rulesets-v7` moved its conversion to v7 with the other rule kinds.
 
 - [x] **Verified first** (live on `kflare.dev`, 2026-10-14; see the notes below): any entry point in this phase, even an
   empty one, stops Cloudflare's default deployment of the Free Managed Ruleset, and deleting the entry point brings it
@@ -1063,9 +1066,9 @@ Each is the foundation plus typed action parameters. Together they replace Page 
 
 #### Code generator (`kflare-gen`)
 **Depends on:** `feat/shared-client`, `feat/rulesets-foundation`; eight PRs, in order
-**Status:** 🚧 In progress: PRs 1 to 6 (`feat/cloudflare-go-v7`, `feat/crud-reconciler`, `feat/generator-types`,
-`feat/generator-openapi`, `feat/generator-controllers`, `feat/d1-database-controller`) ✅, next PR 7
-(`feat/rulesets-v7`). Planned and decided 2026-10-13
+**Status:** 🚧 In progress: PRs 1 to 7 (`feat/cloudflare-go-v7`, `feat/crud-reconciler`, `feat/generator-types`,
+`feat/generator-openapi`, `feat/generator-controllers`, `feat/d1-database-controller`, `feat/rulesets-v7`) ✅, next PR 8
+(`feat/generator-rule-kinds`). Planned and decided 2026-10-13
 
 Most of a new kind is the same wiring every time. IPList (#26) changed 27 files (+2,596 lines). Besides its types and
 its bulk-operation logic, it repeated `Get/SetConditions`, registration in `cmd/main.go`, the CRD kustomization, the
@@ -1079,7 +1082,7 @@ part from Cloudflare's own description of its API. What Cloudflare does not desc
    them only. v0.119 is hand-written, with no machine-readable list of its resources and operations to generate from
 2. Fields are **opt-out**: a generated kind has every field v7 exposes for it, minus those its entry ignores. The
    output is committed, so each field an SDK bump adds shows up in review
-3. `ManagedRuleset` is built by hand first, as planned (✅); `feat/rulesets-v7` moves its conversion to v7 later
+3. `ManagedRuleset` is built by hand first, as planned (✅); `feat/rulesets-v7` moved its conversion to v7 (✅)
 4. The first new kind generated end to end is a free, account-level resource: a D1 database or a Turnstile widget,
    picked when that PR starts, after checking the Free-plan limits and the token permission. Picked 2026-10-15:
    `D1Database` (see [its section](#branch-featd1-database-controller))
@@ -1189,7 +1192,7 @@ kinds:
 | 4 | `feat/generator-openapi` | ✅ `kflare-gen sync-spec`, the committed subset, constraints and hints (see the notes below the table) | Golden tests: the constraints generated for KVNamespace, R2Bucket and IPList match their CRDs, or the entry says why not |
 | 5 | `feat/generator-controllers` | ✅ The controller emitter: descriptor, conversions, drift, RBAC, registration, protection, sample, envtest table (see the notes below the table) | KVNamespace is fully generated and its hand port deleted; its specs and the live e2e pass |
 | 6 | `feat/d1-database-controller` | ✅ `D1Database`, the first new kind, generated end to end (decision 4; see [its section](#branch-featd1-database-controller)) | Only its entry, any hooks and its live e2e spec are hand-written |
-| 7 | `feat/rulesets-v7` | The Rulesets foundation on v7: `Phases.Get`, `Rulesets.New` and `Rules.New/Edit/Delete` (with positions) replace the `Raw` calls in `pkg/cloudflare/rulesets.go`; the rule kinds' conversions move to v7 | Rule specs and the live e2e pass, with the rule delete checked live again (v0.119's fails) |
+| 7 | `feat/rulesets-v7` | ✅ The Rulesets foundation on v7: `Phases.Get`, `Rulesets.New` and `Rules.New/Edit/Delete` (with positions) replace the `Raw` calls in `pkg/cloudflare/rulesets.go`; the rule kinds' conversions move to v7 (see the notes below the table) | Rule specs and the live e2e pass, with the rule delete checked live again (v0.119's fails) |
 | 8 | `feat/generator-rule-kinds` | A rule-kind emitter: the action parameters' types from v7's rule variants (`rulesets.RewriteRuleParam` and siblings) and the `definition` conversion, with `TransformRule` as its first kind | `TransformRule`'s live e2e passes. The other four Rules kinds follow, one PR each |
 
 - **The shared CRUD reconciler as built** (`feat/crud-reconciler`, 2026-10-14): `crudResourceKind[O, A, R]` (the API
@@ -1262,6 +1265,24 @@ kinds:
   nothing kflare sends is dropped: D1's takes only `read_replication`, which the entry ignores, so the kind has no
   Update and every field is immutable. Turnstile was not picked: its widgets need a list of domains, a secret that
   belongs in a Kubernetes Secret, and names Cloudflare does not keep unique
+- **The Rulesets foundation on v7 as built** (`feat/rulesets-v7`, 2026-10-15): the rule kinds call cloudflare-go v7's
+  rulesets services. `Phases.Get` reads an entry point; `Rulesets.New` creates one holding the rule, and
+  `Rulesets.Delete` deletes the managed phase's emptied one; `Rules.New` adds a rule at a position, `Rules.Edit`
+  replaces it or, holding only a position, moves it, and `Rules.Delete` deletes it. `RulesetRuleAPI` is now a struct of
+  three narrow interfaces (`RulesetPhasesAPI`, `RulesetsAPI`, `RulesetRulesAPI`) that v7's services satisfy, and
+  `pkg/cloudflare/rulesets.go` is gone. v7 has a rule type per action, and none shared for `challenge` and
+  `js_challenge`, so a kind's conversion fills v7's generic rule, `rulesets.RulesetNewParamsRule`, with v7's typed
+  params for its action (`SkipRuleActionParametersParam`, `ExecuteRuleActionParametersParam`,
+  `BlockRuleRatelimitParam`, ...). `rulesetRuleDefinition` starts it with the fields every kind shares, which PR 8's
+  generated conversions can use too, and the foundation copies it into the generic bodies of `Rules.New` and
+  `Rules.Edit`; a spec fails if an SDK bump gives them a field the copy misses. A position is a map: v7 sends a
+  struct's empty fields as well, and an empty `before` places a rule first. Drift compares the JSON v7 would send with
+  Cloudflare's copy as v7 received it (`JSON.RawJSON()`), and the conversions send what v0 sent: optional fields only
+  when set. The Rulesets fake keeps rules as JSON, reads every request from the JSON v7 sends and answers with v7's
+  types decoded from JSON; the conversion tables pin each kind's JSON. 33 mutations of the sync, the comparison, the
+  request bodies and the conversions were all caught. Live (run `ba4f94`, 15 of 15): idle reconciles wrote nothing,
+  the all-at-once deletion deleted every rule through v7 (v0.119's delete fails on the same answer), kflare deleted the
+  managed phase's emptied entry point, and the manager logged no error
 - `TransformRule` goes first because the dev token can already write its phases. Its immutable `spec.type` picks one
   of three phases, so the foundation's one phase per kind becomes a function of the spec
 - **Later:** a runtime for settings-style singletons (the shape of TunnelConfiguration and ManagedTransform; the 90
@@ -1453,9 +1474,10 @@ export CF_E2E_ZONE=kflare.dev               # zone for the DNS e2e specs; adopte
 ## Current Status
 
 > **Phases 1 and 2 complete. Phase 3 in progress: `KVNamespace`, `R2Bucket`, `WAFCustomRule`, `RateLimitRule`, `IPList`,
-> `ManagedRuleset` and `D1Database` done.** cloudflare-go is at v0.119, with v7.12.0 next to it for the generated kinds;
-> rule kinds share the Rulesets foundation and controller; KVNamespace and D1Database are generated in full, on v7 and
-> the shared CRUD reconciler. The code generator, `kflare-gen`, is under way: next `feat/rulesets-v7` (see Phase 3).
+> `ManagedRuleset` and `D1Database` done.** cloudflare-go is at v0.119, with v7.12.0 next to it for the generated kinds
+> and the rule kinds; rule kinds share the Rulesets foundation and controller; KVNamespace and D1Database are generated
+> in full, on v7 and the shared CRUD reconciler. The code generator, `kflare-gen`, is under way: next
+> `feat/generator-rule-kinds` (see Phase 3).
 > Zero Trust still waits on account setup. Items needing a paid plan, add-on or account setup are tracked under
 > "Deferred: paid plan, add-on or account setup" in Phase 3.
 > Last updated: October 2026

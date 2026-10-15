@@ -17,7 +17,8 @@ import (
 	"slices"
 	"strings"
 
-	cf "github.com/cloudflare/cloudflare-go"
+	"github.com/cloudflare/cloudflare-go/v7/option"
+	"github.com/cloudflare/cloudflare-go/v7/rulesets"
 
 	cfpkg "github.com/JonathanGraniero/kflare/pkg/cloudflare"
 )
@@ -41,6 +42,10 @@ import (
 //   - An emptied entry point stays, except in the phases where an entry point
 //     changes what Cloudflare runs even without rules
 //     (emptiedEntrypointPhases).
+//
+// A rule is cloudflare-go v7's rulesets.RulesetNewParamsRule: the rule as
+// Rulesets.New takes it, whatever its action, with the action's parameters
+// as v7's typed params (rulesets.SkipRuleActionParametersParam, ...).
 
 // rulesetEntrypointExistsCode is the Cloudflare error code (with HTTP 400)
 // for creating a zone entry point ruleset in a phase that already has one.
@@ -61,32 +66,52 @@ const managedRulesetLatestVersion = "latest"
 // http_request_firewall_managed, any entry point stops the managed rulesets
 // Cloudflare deploys by default, such as the Free Managed Ruleset on Free
 // zones, and deleting it brings them back (both verified live, 2026-10-14).
-var emptiedEntrypointPhases = map[string]bool{
-	string(cf.RulesetPhaseHTTPRequestFirewallManaged): true,
+var emptiedEntrypointPhases = map[rulesets.Phase]bool{
+	rulesets.PhaseHTTPRequestFirewallManaged: true,
 }
 
-// RulesetRuleAPI is the part of the Cloudflare API that rule controllers use.
-// The rule calls are kflare's own (pkg/cloudflare/rulesets.go): cloudflare-go
-// cannot create or edit a single rule, and mishandles the response of a rule
-// delete.
-type RulesetRuleAPI interface {
-	GetEntrypointRuleset(ctx context.Context, rc *cf.ResourceContainer, phase string) (cf.Ruleset, error)
-	CreateRuleset(ctx context.Context, rc *cf.ResourceContainer, params cf.CreateRulesetParams) (cf.Ruleset, error)
-	CreateRulesetRule(
-		ctx context.Context, rc *cf.ResourceContainer, rulesetID string,
-		rule cf.RulesetRule, position *cfpkg.RulesetRulePosition,
-	) (cf.Ruleset, error)
-	UpdateRulesetRule(
-		ctx context.Context, rc *cf.ResourceContainer, rulesetID, ruleID string, rule cf.RulesetRule,
-	) (cf.Ruleset, error)
-	MoveRulesetRule(
-		ctx context.Context, rc *cf.ResourceContainer, rulesetID, ruleID string, position cfpkg.RulesetRulePosition,
-	) (cf.Ruleset, error)
-	DeleteRulesetRule(ctx context.Context, rc *cf.ResourceContainer, rulesetID, ruleID string) (cf.Ruleset, error)
-	DeleteRuleset(ctx context.Context, rc *cf.ResourceContainer, rulesetID string) error
+// RulesetPhasesAPI is the part of cloudflare-go v7's rulesets.PhaseService
+// that the rule kinds call: reading a phase's entry point.
+type RulesetPhasesAPI interface {
+	Get(ctx context.Context, rulesetPhase rulesets.Phase, query rulesets.PhaseGetParams,
+		opts ...option.RequestOption) (*rulesets.PhaseGetResponse, error)
 }
 
-var _ RulesetRuleAPI = (*cfpkg.Client)(nil)
+// RulesetsAPI is the part of cloudflare-go v7's rulesets.RulesetService that
+// the rule kinds call: creating and deleting an entry point.
+type RulesetsAPI interface {
+	New(ctx context.Context, params rulesets.RulesetNewParams,
+		opts ...option.RequestOption) (*rulesets.RulesetNewResponseEnvelopeResult, error)
+	Delete(ctx context.Context, rulesetID string, params rulesets.RulesetDeleteParams,
+		opts ...option.RequestOption) error
+}
+
+// RulesetRulesAPI is the part of cloudflare-go v7's rulesets.RuleService
+// that the rule kinds call: writing one rule of a ruleset.
+type RulesetRulesAPI interface {
+	New(ctx context.Context, rulesetID string, params rulesets.RuleNewParams,
+		opts ...option.RequestOption) (*rulesets.RuleNewResponseEnvelopeResult, error)
+	Edit(ctx context.Context, rulesetID, ruleID string, params rulesets.RuleEditParams,
+		opts ...option.RequestOption) (*rulesets.RuleEditResponseEnvelopeResult, error)
+	Delete(ctx context.Context, rulesetID, ruleID string, params rulesets.RuleDeleteParams,
+		opts ...option.RequestOption) (*rulesets.RuleDeleteResponseEnvelopeResult, error)
+}
+
+var (
+	_ RulesetPhasesAPI = (*rulesets.PhaseService)(nil)
+	_ RulesetsAPI      = (*rulesets.RulesetService)(nil)
+	_ RulesetRulesAPI  = (*rulesets.RuleService)(nil)
+)
+
+// RulesetRuleAPI is the Rulesets API the rule kinds call. Tests inject
+// fakes; in production these are v7's services (defaultRulesetRuleAPI).
+// cloudflare-go v0.119, which the hand-written controllers use, cannot create
+// or edit a single rule, and fails on the response of a rule delete.
+type RulesetRuleAPI struct {
+	Phases   RulesetPhasesAPI
+	Rulesets RulesetsAPI
+	Rules    RulesetRulesAPI
+}
 
 // rulesetRuleRef returns the ref of the rule a resource manages: "kflare-"
 // and the first 32 hex characters of the SHA-256 of kind/namespace/name.
@@ -148,35 +173,35 @@ type rulesetRuleState struct {
 func syncRulesetRule(
 	ctx context.Context,
 	api RulesetRuleAPI,
-	zoneID, phase string,
-	rule cf.RulesetRule,
+	zoneID string,
+	phase rulesets.Phase,
+	rule rulesets.RulesetNewParamsRule,
 	peers []rulesetRulePeer,
 ) (rulesetRuleState, error) {
-	rc := cf.ZoneIdentifier(zoneID)
-	ruleset, wrote, err := writeRulesetRule(ctx, api, rc, phase, rule, peers)
+	zone := zoneRulesets{api: api, zoneID: zoneID}
+	ruleset, wrote, err := writeRulesetRule(ctx, zone, phase, rule, peers)
 	if cfpkg.IsNotFound(err) {
 		// The rule or its ruleset was deleted between the read and the
 		// write. Read the entry point again, and try once more.
-		ruleset, wrote, err = writeRulesetRule(ctx, api, rc, phase, rule, peers)
+		ruleset, wrote, err = writeRulesetRule(ctx, zone, phase, rule, peers)
 	}
 	if err != nil {
 		return rulesetRuleState{}, err
 	}
-	ruleset, moved, err := orderRulesetRules(ctx, api, rc, ruleset, peers)
+	ruleset, moved, err := orderRulesetRules(ctx, zone, ruleset, peers)
 	if err != nil {
 		return rulesetRuleState{}, err
 	}
-	current, found := ruleWithRef(ruleset.Rules, rule.Ref)
+	current, found := ruleset.rule(rule.Ref.Value)
 	if !found {
 		// Deleted by someone else right after kflare wrote it; the error
 		// makes the next reconcile write it again.
-		return rulesetRuleState{}, fmt.Errorf("rule %s disappeared from ruleset %s during the sync", rule.Ref, ruleset.ID)
+		return rulesetRuleState{}, fmt.Errorf("rule %s disappeared from ruleset %s during the sync",
+			rule.Ref.Value, ruleset.id)
 	}
-	state := rulesetRuleState{rulesetID: ruleset.ID, ruleID: current.ID, wrote: wrote, moved: moved}
-	if current.Version != nil {
-		state.version = *current.Version
-	}
-	return state, nil
+	return rulesetRuleState{
+		rulesetID: ruleset.id, ruleID: current.id, version: current.version, wrote: wrote, moved: moved,
+	}, nil
 }
 
 // writeRulesetRule creates or updates rule in the phase's entry point,
@@ -185,45 +210,38 @@ func syncRulesetRule(
 // reported it, and whether it wrote.
 func writeRulesetRule(
 	ctx context.Context,
-	api RulesetRuleAPI,
-	rc *cf.ResourceContainer,
-	phase string,
-	rule cf.RulesetRule,
+	zone zoneRulesets,
+	phase rulesets.Phase,
+	rule rulesets.RulesetNewParamsRule,
 	peers []rulesetRulePeer,
-) (cf.Ruleset, bool, error) {
-	ruleset, err := api.GetEntrypointRuleset(ctx, rc, phase)
+) (entrypoint, bool, error) {
+	ruleset, err := zone.getEntrypoint(ctx, phase)
 	if cfpkg.IsNotFound(err) {
-		created, createErr := api.CreateRuleset(ctx, rc, cf.CreateRulesetParams{
-			Name:  entrypointRulesetName,
-			Kind:  string(cf.RulesetKindZone),
-			Phase: phase,
-			Rules: []cf.RulesetRule{rule},
-		})
+		created, createErr := zone.createEntrypoint(ctx, phase, rule)
 		if createErr == nil {
 			return created, true, nil
 		}
 		if !cfpkg.HasErrorCode(createErr, rulesetEntrypointExistsCode) {
-			return cf.Ruleset{}, false, createErr
+			return entrypoint{}, false, createErr
 		}
 		// Another resource created the entry point first: add the rule to it.
-		ruleset, err = api.GetEntrypointRuleset(ctx, rc, phase)
+		ruleset, err = zone.getEntrypoint(ctx, phase)
 	}
 	if err != nil {
-		return cf.Ruleset{}, false, err
+		return entrypoint{}, false, err
 	}
 
-	current, found := ruleWithRef(ruleset.Rules, rule.Ref)
+	current, found := ruleset.rule(rule.Ref.Value)
 	switch {
 	case !found:
-		position := insertPosition(ruleset.Rules, rule.Ref, peers)
-		ruleset, err = api.CreateRulesetRule(ctx, rc, ruleset.ID, rule, position)
-	case !rulesetRuleMatches(rule, current):
-		ruleset, err = api.UpdateRulesetRule(ctx, rc, ruleset.ID, current.ID, rule)
+		ruleset, err = zone.createRule(ctx, ruleset.id, rule, insertPosition(ruleset, rule.Ref.Value, peers))
+	case !rulesetRuleMatches(rule, current.raw):
+		ruleset, err = zone.updateRule(ctx, ruleset.id, current.id, rule)
 	default:
 		return ruleset, false, nil
 	}
 	if err != nil {
-		return cf.Ruleset{}, false, err
+		return entrypoint{}, false, err
 	}
 	return ruleset, true, nil
 }
@@ -232,20 +250,20 @@ func writeRulesetRule(
 // stay in order: right after the closest peer that sorts before it, or else
 // right before the closest that sorts after it. It is nil, which appends the
 // rule, when no other peer's rule is in the ruleset or ref is not a peer.
-func insertPosition(rules []cf.RulesetRule, ref string, peers []rulesetRulePeer) *cfpkg.RulesetRulePosition {
+func insertPosition(ruleset entrypoint, ref string, peers []rulesetRulePeer) rulePosition {
 	sorted := sortedRulesetRulePeers(peers)
 	self := slices.IndexFunc(sorted, func(p rulesetRulePeer) bool { return p.ref == ref })
 	if self < 0 {
 		return nil
 	}
 	for i := self - 1; i >= 0; i-- {
-		if before, ok := ruleWithRef(rules, sorted[i].ref); ok {
-			return &cfpkg.RulesetRulePosition{After: before.ID}
+		if before, ok := ruleset.rule(sorted[i].ref); ok {
+			return rulePosition{"after": before.id}
 		}
 	}
 	for _, peer := range sorted[self+1:] {
-		if after, ok := ruleWithRef(rules, peer.ref); ok {
-			return &cfpkg.RulesetRulePosition{Before: after.ID}
+		if after, ok := ruleset.rule(peer.ref); ok {
+			return rulePosition{"before": after.id}
 		}
 	}
 	return nil
@@ -259,21 +277,19 @@ func insertPosition(rules []cf.RulesetRule, ref string, peers []rulesetRulePeer)
 // ruleset as Cloudflare last reported it, and whether it moved anything.
 func orderRulesetRules(
 	ctx context.Context,
-	api RulesetRuleAPI,
-	rc *cf.ResourceContainer,
-	ruleset cf.Ruleset,
+	zone zoneRulesets,
+	ruleset entrypoint,
 	peers []rulesetRulePeer,
-) (cf.Ruleset, bool, error) {
+) (entrypoint, bool, error) {
 	moved := false
 	previousID := ""
 	for _, peer := range sortedRulesetRulePeers(peers) {
-		rule, found := ruleWithRef(ruleset.Rules, peer.ref)
+		rule, found := ruleset.rule(peer.ref)
 		if !found {
 			continue
 		}
-		if previousID != "" && ruleIndex(ruleset.Rules, rule.ID) < ruleIndex(ruleset.Rules, previousID) {
-			updated, err := api.MoveRulesetRule(ctx, rc, ruleset.ID, rule.ID,
-				cfpkg.RulesetRulePosition{After: previousID})
+		if previousID != "" && ruleset.index(rule.id) < ruleset.index(previousID) {
+			updated, err := zone.moveRule(ctx, ruleset.id, rule.id, rulePosition{"after": previousID})
 			if cfpkg.IsNotFound(err) {
 				// One of the two rules was deleted meanwhile. Stop here; the
 				// caller checks the order again shortly.
@@ -284,7 +300,7 @@ func orderRulesetRules(
 			}
 			ruleset, moved = updated, true
 		}
-		previousID = rule.ID
+		previousID = rule.id
 	}
 	return ruleset, moved, nil
 }
@@ -297,22 +313,29 @@ func orderRulesetRules(
 // In the phases of emptiedEntrypointPhases, an entry point left without rules
 // is deleted, which restores what Cloudflare runs without one, unless
 // peersRemain: another kflare resource is about to write its rule to it.
-func deleteRulesetRule(ctx context.Context, api RulesetRuleAPI, zoneID, phase, ref string, peersRemain bool) error {
-	rc := cf.ZoneIdentifier(zoneID)
-	ruleset, err := api.GetEntrypointRuleset(ctx, rc, phase)
+func deleteRulesetRule(
+	ctx context.Context,
+	api RulesetRuleAPI,
+	zoneID string,
+	phase rulesets.Phase,
+	ref string,
+	peersRemain bool,
+) error {
+	zone := zoneRulesets{api: api, zoneID: zoneID}
+	ruleset, err := zone.getEntrypoint(ctx, phase)
 	if cfpkg.IsNotFound(err) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if rule, found := ruleWithRef(ruleset.Rules, ref); found {
-		updated, err := api.DeleteRulesetRule(ctx, rc, ruleset.ID, rule.ID)
+	if rule, found := ruleset.rule(ref); found {
+		updated, err := zone.deleteRule(ctx, ruleset.id, rule.id)
 		switch {
 		case cfpkg.IsNotFound(err):
 			// The rule, or the whole entry point, went meanwhile. Read the
 			// entry point again to see whether it is empty.
-			ruleset, err = api.GetEntrypointRuleset(ctx, rc, phase)
+			ruleset, err = zone.getEntrypoint(ctx, phase)
 			if cfpkg.IsNotFound(err) {
 				return nil
 			}
@@ -325,75 +348,255 @@ func deleteRulesetRule(ctx context.Context, api RulesetRuleAPI, zoneID, phase, r
 			ruleset = updated
 		}
 	}
-	if !emptiedEntrypointPhases[phase] || peersRemain || len(ruleset.Rules) > 0 {
+	if !emptiedEntrypointPhases[phase] || peersRemain || len(ruleset.rules) > 0 {
 		return nil
 	}
-	if err := api.DeleteRuleset(ctx, rc, ruleset.ID); err != nil && !cfpkg.IsNotFound(err) {
+	if err := zone.deleteEntrypoint(ctx, ruleset.id); err != nil && !cfpkg.IsNotFound(err) {
 		return err
 	}
 	return nil
 }
 
-// ruleWithRef returns the rule in rules with ref.
-func ruleWithRef(rules []cf.RulesetRule, ref string) (cf.RulesetRule, bool) {
-	for _, rule := range rules {
-		if rule.Ref == ref {
-			return rule, true
-		}
+// entrypoint is what kflare reads of a zone's entry point ruleset: its ID
+// and its rules, in order.
+type entrypoint struct {
+	id    string
+	rules []entrypointRule
+}
+
+// entrypointRule is a rule of an entry point as Cloudflare returned it.
+type entrypointRule struct {
+	id      string
+	ref     string
+	version string
+	// raw is the rule's JSON, which rulesetRuleMatches compares.
+	raw string
+}
+
+// rule returns the rule with ref.
+func (e entrypoint) rule(ref string) (entrypointRule, bool) {
+	i := slices.IndexFunc(e.rules, func(rule entrypointRule) bool { return rule.ref == ref })
+	if i < 0 {
+		return entrypointRule{}, false
 	}
-	return cf.RulesetRule{}, false
+	return e.rules[i], true
 }
 
-// ruleIndex returns the position of the rule with id in rules, or -1.
-func ruleIndex(rules []cf.RulesetRule, id string) int {
-	return slices.IndexFunc(rules, func(rule cf.RulesetRule) bool { return rule.ID == id })
+// index returns the position of the rule with id, or -1.
+func (e entrypoint) index(id string) int {
+	return slices.IndexFunc(e.rules, func(rule entrypointRule) bool { return rule.id == id })
 }
 
-// rulesetRuleMatches reports whether actual, a rule as Cloudflare returned
-// it, already is desired. It compares the definitions only, not the fields
-// Cloudflare sets (the ID, version and time of the last update), and counts
-// what Cloudflare fills in by itself as set (verified live): a rule is
+// rulePosition places a rule right before or right after another rule of the
+// same ruleset: {"before": id} or {"after": id}. v7's rule bodies take any
+// value as a position (their typed positions are one per action), and a map
+// holds only the key it is given: a struct would also send the other key,
+// empty, which places a rule first or last.
+type rulePosition map[string]string
+
+// zoneRulesets makes the Rulesets calls of one zone, and reads the entry
+// point back from each call's answer. v7 answers every call with a ruleset
+// type of its own.
+type zoneRulesets struct {
+	api    RulesetRuleAPI
+	zoneID string
+}
+
+// getEntrypoint reads the zone's entry point ruleset for phase. A zone without
+// one answers 404.
+func (z zoneRulesets) getEntrypoint(ctx context.Context, phase rulesets.Phase) (entrypoint, error) {
+	var params rulesets.PhaseGetParams
+	params.ZoneID.Value, params.ZoneID.Present = z.zoneID, true
+	ruleset, err := z.api.Phases.Get(ctx, phase, params)
+	if err != nil {
+		return entrypoint{}, err
+	}
+	read := entrypoint{id: ruleset.ID}
+	for _, rule := range ruleset.Rules {
+		read.rules = append(read.rules, entrypointRule{rule.ID, rule.Ref, rule.Version, rule.JSON.RawJSON()})
+	}
+	return read, nil
+}
+
+// createEntrypoint creates the zone's entry point ruleset for phase, holding
+// rule.
+func (z zoneRulesets) createEntrypoint(
+	ctx context.Context, phase rulesets.Phase, rule rulesets.RulesetNewParamsRule,
+) (entrypoint, error) {
+	var params rulesets.RulesetNewParams
+	params.ZoneID.Value, params.ZoneID.Present = z.zoneID, true
+	params.Kind.Value, params.Kind.Present = rulesets.KindZone, true
+	params.Name.Value, params.Name.Present = entrypointRulesetName, true
+	params.Phase.Value, params.Phase.Present = phase, true
+	params.Rules.Value, params.Rules.Present = []rulesets.RulesetNewParamsRuleUnion{rule}, true
+	ruleset, err := z.api.Rulesets.New(ctx, params)
+	if err != nil {
+		return entrypoint{}, err
+	}
+	read := entrypoint{id: ruleset.ID}
+	for _, rule := range ruleset.Rules {
+		read.rules = append(read.rules, entrypointRule{rule.ID, rule.Ref, rule.Version, rule.JSON.RawJSON()})
+	}
+	return read, nil
+}
+
+// createRule adds rule to the ruleset at position, or after its last rule
+// when position is nil.
+func (z zoneRulesets) createRule(
+	ctx context.Context, rulesetID string, rule rulesets.RulesetNewParamsRule, position rulePosition,
+) (entrypoint, error) {
+	body := rulesets.RuleNewParamsBody{
+		ID:                     rule.ID,
+		ActionParameters:       rule.ActionParameters,
+		Categories:             rule.Categories,
+		Description:            rule.Description,
+		Enabled:                rule.Enabled,
+		ExposedCredentialCheck: rule.ExposedCredentialCheck,
+		Expression:             rule.Expression,
+		Logging:                rule.Logging,
+		Ratelimit:              rule.Ratelimit,
+		Ref:                    rule.Ref,
+	}
+	body.Action.Value, body.Action.Present = rulesets.RuleNewParamsBodyAction(rule.Action.Value), rule.Action.Present
+	if position != nil {
+		body.Position.Value, body.Position.Present = position, true
+	}
+	params := rulesets.RuleNewParams{Body: body}
+	params.ZoneID.Value, params.ZoneID.Present = z.zoneID, true
+	ruleset, err := z.api.Rules.New(ctx, rulesetID, params)
+	if err != nil {
+		return entrypoint{}, err
+	}
+	read := entrypoint{id: ruleset.ID}
+	for _, rule := range ruleset.Rules {
+		read.rules = append(read.rules, entrypointRule{rule.ID, rule.Ref, rule.Version, rule.JSON.RawJSON()})
+	}
+	return read, nil
+}
+
+// updateRule replaces the rule ruleID with rule. Cloudflare replaces the
+// whole rule, so a field rule leaves unset is reset rather than kept; the
+// rule keeps its ID and place.
+func (z zoneRulesets) updateRule(
+	ctx context.Context, rulesetID, ruleID string, rule rulesets.RulesetNewParamsRule,
+) (entrypoint, error) {
+	body := rulesets.RuleEditParamsBody{
+		ID:                     rule.ID,
+		ActionParameters:       rule.ActionParameters,
+		Categories:             rule.Categories,
+		Description:            rule.Description,
+		Enabled:                rule.Enabled,
+		ExposedCredentialCheck: rule.ExposedCredentialCheck,
+		Expression:             rule.Expression,
+		Logging:                rule.Logging,
+		Ratelimit:              rule.Ratelimit,
+		Ref:                    rule.Ref,
+	}
+	body.Action.Value, body.Action.Present = rulesets.RuleEditParamsBodyAction(rule.Action.Value), rule.Action.Present
+	return z.editRule(ctx, rulesetID, ruleID, body)
+}
+
+// moveRule moves the rule ruleID to position. An edit that holds only a
+// position changes neither the rule's definition nor its version (verified
+// live).
+func (z zoneRulesets) moveRule(
+	ctx context.Context, rulesetID, ruleID string, position rulePosition,
+) (entrypoint, error) {
+	var body rulesets.RuleEditParamsBody
+	body.Position.Value, body.Position.Present = position, true
+	return z.editRule(ctx, rulesetID, ruleID, body)
+}
+
+func (z zoneRulesets) editRule(
+	ctx context.Context, rulesetID, ruleID string, body rulesets.RuleEditParamsBody,
+) (entrypoint, error) {
+	params := rulesets.RuleEditParams{Body: body}
+	params.ZoneID.Value, params.ZoneID.Present = z.zoneID, true
+	ruleset, err := z.api.Rules.Edit(ctx, rulesetID, ruleID, params)
+	if err != nil {
+		return entrypoint{}, err
+	}
+	read := entrypoint{id: ruleset.ID}
+	for _, rule := range ruleset.Rules {
+		read.rules = append(read.rules, entrypointRule{rule.ID, rule.Ref, rule.Version, rule.JSON.RawJSON()})
+	}
+	return read, nil
+}
+
+// deleteRule removes the rule ruleID from the ruleset. Cloudflare answers with
+// the ruleset (200), which cloudflare-go v0.119 fails to read and v7 reads.
+func (z zoneRulesets) deleteRule(ctx context.Context, rulesetID, ruleID string) (entrypoint, error) {
+	var params rulesets.RuleDeleteParams
+	params.ZoneID.Value, params.ZoneID.Present = z.zoneID, true
+	ruleset, err := z.api.Rules.Delete(ctx, rulesetID, ruleID, params)
+	if err != nil {
+		return entrypoint{}, err
+	}
+	read := entrypoint{id: ruleset.ID}
+	for _, rule := range ruleset.Rules {
+		read.rules = append(read.rules, entrypointRule{rule.ID, rule.Ref, rule.Version, rule.JSON.RawJSON()})
+	}
+	return read, nil
+}
+
+// deleteEntrypoint deletes the ruleset rulesetID, an entry point.
+func (z zoneRulesets) deleteEntrypoint(ctx context.Context, rulesetID string) error {
+	var params rulesets.RulesetDeleteParams
+	params.ZoneID.Value, params.ZoneID.Present = z.zoneID, true
+	return z.api.Rulesets.Delete(ctx, rulesetID, params)
+}
+
+// rulesetRuleMatches reports whether actual, a rule's JSON as Cloudflare
+// returned it, already is desired. It compares the definitions only, not the
+// fields Cloudflare sets (the ID, version and time of the last update), and
+// counts what Cloudflare fills in by itself as set (verified live): a rule is
 // enabled unless told otherwise, a skip rule logs its matches, and an execute
 // rule runs the managed ruleset's latest version.
-func rulesetRuleMatches(desired, actual cf.RulesetRule) bool {
-	want, err := comparableRule(desired)
+func rulesetRuleMatches(desired rulesets.RulesetNewParamsRule, actual string) bool {
+	sent, err := desired.MarshalJSON()
 	if err != nil {
 		return false
 	}
-	got, err := comparableRule(actual)
+	want, err := comparableRule(sent)
+	if err != nil {
+		return false
+	}
+	got, err := comparableRule([]byte(actual))
 	if err != nil {
 		return false
 	}
 	return reflect.DeepEqual(want, got)
 }
 
-// comparableRule turns a rule's definition into plain JSON values, with
-// Cloudflare's defaults filled in and empty objects, arrays and nulls left
-// out, so that two definitions compare equal when Cloudflare treats them the
-// same.
-func comparableRule(rule cf.RulesetRule) (any, error) {
-	rule.ID, rule.Version, rule.LastUpdated = "", nil, nil
-	if rule.Enabled == nil {
-		rule.Enabled = cf.BoolPtr(true)
-	}
-	if rule.Action == string(cf.RulesetRuleActionSkip) && rule.Logging == nil {
-		rule.Logging = &cf.RulesetRuleLogging{Enabled: cf.BoolPtr(true)}
-	}
-	if rule.Action == string(cf.RulesetRuleActionExecute) && rule.ActionParameters != nil &&
-		rule.ActionParameters.Version == nil {
-		params := *rule.ActionParameters
-		params.Version = cf.StringPtr(managedRulesetLatestVersion)
-		rule.ActionParameters = &params
-	}
-	raw, err := json.Marshal(rule)
-	if err != nil {
+// comparableRule decodes a rule's JSON into plain values, without the fields
+// Cloudflare sets and the nulls and empty objects and arrays, and with
+// Cloudflare's defaults filled in, so that two definitions compare equal when
+// Cloudflare treats them the same.
+func comparableRule(raw []byte) (map[string]any, error) {
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return nil, err
 	}
-	var value any
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return nil, err
+	rule, _ := withoutEmpty(decoded).(map[string]any)
+	delete(rule, "id")
+	delete(rule, "version")
+	delete(rule, "last_updated")
+	if _, set := rule["enabled"]; !set {
+		rule["enabled"] = true
 	}
-	return withoutEmpty(value), nil
+	switch rule["action"] {
+	case string(rulesets.RulesetNewParamsRulesActionSkip):
+		if _, set := rule["logging"]; !set {
+			rule["logging"] = map[string]any{"enabled": true}
+		}
+	case string(rulesets.RulesetNewParamsRulesActionExecute):
+		if params, ok := rule["action_parameters"].(map[string]any); ok {
+			if _, set := params["version"]; !set {
+				params["version"] = managedRulesetLatestVersion
+			}
+		}
+	}
+	return rule, nil
 }
 
 // withoutEmpty drops the nulls, and the objects and arrays that are or end

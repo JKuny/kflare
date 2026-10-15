@@ -8,6 +8,7 @@ package cloudflare_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -42,6 +43,15 @@ func v7Error(t *testing.T, status int, codes ...int) error {
 	}
 	return v7ErrorBody(t, status, mustJSON(t, map[string]any{"result": nil, "success": false, "errors": errs,
 		"messages": []any{}}))
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("encoding %v: %v", v, err)
+	}
+	return string(b)
 }
 
 // v7ErrorBody returns the error cloudflare-go v7 returns when Cloudflare

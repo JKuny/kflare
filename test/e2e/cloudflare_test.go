@@ -18,6 +18,7 @@ import (
 
 	cf "github.com/cloudflare/cloudflare-go"
 	"github.com/cloudflare/cloudflare-go/v7/d1"
+	"github.com/cloudflare/cloudflare-go/v7/rulesets"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -79,6 +80,9 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		// databases is cloudflare-go v7's D1 service: v0 does not report a
 		// database's jurisdiction.
 		databases *d1.DatabaseService
+		// ruleService is cloudflare-go v7's ruleset rule service: v0's rule
+		// delete fails on the API's answer.
+		ruleService *rulesets.RuleService
 
 		accountKey, tunnelKey, tunnelConfigKey, workerKey, zoneKey, recordKey client.ObjectKey
 		routeKey, exclusionKey, kvKey, bucketKey, wafKey, wafSkipKey          client.ObjectKey
@@ -136,6 +140,7 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		cfClient, err := cfpkg.New(token)
 		Expect(err).NotTo(HaveOccurred())
 		databases = d1.NewDatabaseService(cfClient.V7Options()...)
+		ruleService = rulesets.NewRuleService(cfClient.V7Options()...)
 
 		accountKey = client.ObjectKey{Name: resourceName()}
 		tunnelKey = client.ObjectKey{Namespace: e2eNamespace, Name: "tunnel"}
@@ -169,10 +174,10 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 			}
 			cleanupD1Database(ctx, cfAPI, accountRC, resourceName())
 			if zoneID != "" {
-				cleanupRules(ctx, cfAPI, zoneID, customRulesPhase, ruleRef("WAFCustomRule", wafKey),
+				cleanupRules(ctx, cfAPI, ruleService, zoneID, customRulesPhase, ruleRef("WAFCustomRule", wafKey),
 					ruleRef("WAFCustomRule", wafSkipKey), ruleRef("WAFCustomRule", listRuleKey))
-				cleanupRules(ctx, cfAPI, zoneID, rateLimitPhase, ruleRef("RateLimitRule", rateLimitKey))
-				cleanupRules(ctx, cfAPI, zoneID, managedPhase, ruleRef("ManagedRuleset", managedKey))
+				cleanupRules(ctx, cfAPI, ruleService, zoneID, rateLimitPhase, ruleRef("RateLimitRule", rateLimitKey))
+				cleanupRules(ctx, cfAPI, ruleService, zoneID, managedPhase, ruleRef("ManagedRuleset", managedKey))
 				// An entry point in the managed phase, even an empty one,
 				// stops Cloudflare's default deployment of the Free Managed
 				// Ruleset; deleting it restores the zone as found.
@@ -1007,9 +1012,11 @@ func cleanupEmptyEntrypoint(ctx context.Context, api *cf.API, zoneID, phase stri
 }
 
 // cleanupRules deletes the rules with refs from the zone's entry point in
-// phase. It deletes through kflare's client: cloudflare-go's
+// phase. It deletes through cloudflare-go v7, as kflare does: v0's
 // DeleteRulesetRule reports an error even when the delete succeeds.
-func cleanupRules(ctx context.Context, api *cf.API, zoneID, phase string, refs ...string) {
+func cleanupRules(
+	ctx context.Context, api *cf.API, ruleService *rulesets.RuleService, zoneID, phase string, refs ...string,
+) {
 	zrc := cf.ZoneIdentifier(zoneID)
 	ruleset, err := api.GetEntrypointRuleset(ctx, zrc, phase)
 	if err != nil {
@@ -1022,8 +1029,9 @@ func cleanupRules(ctx context.Context, api *cf.API, zoneID, phase string, refs .
 		if !slices.Contains(refs, rule.Ref) {
 			continue
 		}
-		if _, err := (&cfpkg.Client{API: api}).DeleteRulesetRule(ctx, zrc, ruleset.ID, rule.ID); err != nil &&
-			!cfpkg.IsNotFound(err) {
+		var params rulesets.RuleDeleteParams
+		params.ZoneID.Value, params.ZoneID.Present = zoneID, true
+		if _, err := ruleService.Delete(ctx, ruleset.ID, rule.ID, params); err != nil && !cfpkg.IsNotFound(err) {
 			GinkgoWriter.Printf("cleanup: deleting %s rule %s: %v\n", phase, rule.ID, err)
 		}
 	}

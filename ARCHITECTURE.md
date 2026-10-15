@@ -29,8 +29,8 @@ Secret takes effect on the next reconcile.
 
 Each controller declares a narrow interface over the Cloudflare SDK (for example `DNSRecordAPI`) holding only the calls it
 makes. The production client (`pkg/cloudflare.Client`) embeds cloudflare-go v0 and satisfies all of them, except those of
-the generated kinds, such as `KVNamespaceAPI`: each is part of a cloudflare-go v7 service, built from the client's v7
-options. Tests inject fakes.
+the generated kinds, such as `KVNamespaceAPI`, and of the rule kinds (`RulesetRuleAPI`): each is part of a cloudflare-go
+v7 service, built from the client's v7 options. Tests inject fakes.
 
 ## The reconcile loop
 
@@ -154,7 +154,11 @@ every rule in that phase, kflare's or not, so kflare:
   derived from the resource's identity rather than its UID, a resource restored from a backup finds its rule again.
   A rule without such a ref is never adopted, changed or deleted.
 - Writes one rule at a time, and creates the entry point only when the zone has none. It never replaces an entry point
-  as a whole: that would replace the rules it does not manage.
+  as a whole: that would replace the rules it does not manage. The calls are cloudflare-go v7's: v0.119 cannot create
+  or edit a single rule, and fails on the answer to a rule delete.
+- Compares the rule as Cloudflare returns it, as JSON, with the rule it would send: the fields Cloudflare sets (ID,
+  version, last update) aside, and Cloudflare's defaults counted as set (a rule is enabled, a skip rule logs its
+  matches, an execute rule runs the managed ruleset's latest version). A field set outside kflare is a difference too.
 - Keeps its own rules in a zone and phase in order of `spec.priority`, lower first, with ties broken by namespace and
   name, across namespaces (two Zones in different namespaces can point at the same Cloudflare zone). Each phase is
   its own list: a WAF custom rule's priority does not order rate limiting rules. Rules created outside kflare keep
@@ -285,8 +289,8 @@ hang, and leaves its Cloudflare object in place.
   ref marks them (see [Rules](#rules)).
 - **Rule order covers kflare's rules only.** A rule created outside kflare keeps its place, so it cannot be ordered
   relative to kflare's rules.
-- **Pinned to the legacy SDK.** kflare's controllers use cloudflare-go v0.119, the newest of the v0 line; the
-  generated SDK, v7, is in the module for the generated kinds to come. Some limitations come from v0.119: Tunnel
+- **Pinned to the legacy SDK.** Most of kflare's controllers use cloudflare-go v0.119, the newest of the v0 line; the
+  generated kinds and the rule kinds use the generated SDK, v7. Some limitations come from v0.119: Tunnel
   renames are impossible because `UpdateTunnel` omits the tunnel ID from the request path,
   `originRequest` timeouts are not exposed because `TunnelDuration` does not round-trip, and R2Bucket manages buckets
   in the default jurisdiction only: the SDK cannot send the `cf-r2-jurisdiction` header, and its Worker R2 binding has

@@ -7,7 +7,9 @@ SPDX-License-Identifier: MIT
 package controller
 
 import (
-	cf "github.com/cloudflare/cloudflare-go"
+	"encoding/json"
+	"net/http"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -29,75 +31,58 @@ var _ = Describe("ManagedRulesetReconciler SetupWithManager", func() {
 	})
 
 	It("retries a ruleset deployed twice, and fails on other errors", func() {
-		reason, ok := managedRulesetKind.conflict(cloudflareError(400, managedRulesetConflictCode))
+		reason, ok := managedRulesetKind.conflict(rulesetsError(http.StatusBadRequest, managedRulesetConflictCode))
 		Expect(ok).To(BeTrue())
 		Expect(reason).To(Equal("RulesetConflict"))
 
-		_, ok = managedRulesetKind.conflict(cloudflareError(400, 20226))
+		_, ok = managedRulesetKind.conflict(rulesetsError(http.StatusBadRequest, 20226))
 		Expect(ok).To(BeFalse())
 		_, ok = managedRulesetKind.conflict(nil)
 		Expect(ok).To(BeFalse())
-		_, ok = wafCustomRuleKind.conflict(cloudflareError(400, managedRulesetConflictCode))
+		_, ok = wafCustomRuleKind.conflict(rulesetsError(http.StatusBadRequest, managedRulesetConflictCode))
 		Expect(ok).To(BeFalse(), "only kinds that list a code retry on it")
 	})
 })
 
 var _ = DescribeTable("the Cloudflare rule a ManagedRuleset asks for",
-	func(spec cloudflarev1alpha1.ManagedRulesetSpec, want cf.RulesetRule) {
+	func(spec cloudflarev1alpha1.ManagedRulesetSpec, want string) {
 		spec.Expression = "true"
 		spec.RulesetID = freeManagedRulesetID
-		want.Action = "execute"
-		want.Expression = spec.Expression
-		if want.ActionParameters == nil {
-			want.ActionParameters = &cf.RulesetRuleActionParameters{}
-		}
-		want.ActionParameters.ID = freeManagedRulesetID
-		Expect(managedRulesetDefinition(&cloudflarev1alpha1.ManagedRuleset{Spec: spec})).To(Equal(want))
+		Expect(json.Marshal(managedRulesetDefinition(&cloudflarev1alpha1.ManagedRuleset{Spec: spec}))).To(MatchJSON(want))
 	},
 	Entry("the ruleset as Cloudflare ships it, enabled by default",
 		cloudflarev1alpha1.ManagedRulesetSpec{},
-		cf.RulesetRule{Enabled: cf.BoolPtr(true)}),
+		`{"action":"execute","expression":"true","enabled":true,
+		  "action_parameters":{"id":"77454fe2d30c4220b5701f6fdfb893ba"}}`),
 	Entry("a disabled deployment with a description",
 		cloudflarev1alpha1.ManagedRulesetSpec{
-			RulesetRuleSpec: cloudflarev1alpha1.RulesetRuleSpec{Enabled: cf.BoolPtr(false), Description: "managed rules"},
+			RulesetRuleSpec: cloudflarev1alpha1.RulesetRuleSpec{Enabled: new(false), Description: "managed rules"},
 		},
-		cf.RulesetRule{Enabled: cf.BoolPtr(false), Description: "managed rules"}),
+		`{"action":"execute","expression":"true","description":"managed rules","enabled":false,
+		  "action_parameters":{"id":"77454fe2d30c4220b5701f6fdfb893ba"}}`),
 	Entry("overrides for the whole ruleset",
 		cloudflarev1alpha1.ManagedRulesetSpec{
-			Overrides: &cloudflarev1alpha1.ManagedRulesetOverrides{Enabled: cf.BoolPtr(false), Action: "log"},
+			Overrides: &cloudflarev1alpha1.ManagedRulesetOverrides{Enabled: new(false), Action: "log"},
 		},
-		cf.RulesetRule{
-			Enabled: cf.BoolPtr(true),
-			ActionParameters: &cf.RulesetRuleActionParameters{
-				Overrides: &cf.RulesetRuleActionParametersOverrides{Enabled: cf.BoolPtr(false), Action: "log"},
-			},
-		}),
+		`{"action":"execute","expression":"true","enabled":true,
+		  "action_parameters":{"id":"77454fe2d30c4220b5701f6fdfb893ba","overrides":{"enabled":false,"action":"log"}}}`),
 	Entry("category and rule overrides, sorted by category and rule ID",
 		cloudflarev1alpha1.ManagedRulesetSpec{
 			Overrides: &cloudflarev1alpha1.ManagedRulesetOverrides{
 				Categories: []cloudflarev1alpha1.ManagedRulesetCategoryOverride{
-					{Category: "wordpress", Enabled: cf.BoolPtr(false)},
+					{Category: "wordpress", Enabled: new(false)},
 					{Category: "log4j", Action: "managed_challenge"},
 				},
 				Rules: []cloudflarev1alpha1.ManagedRulesetRuleOverride{
 					{ID: "9f7e454e4cad45abbcc40696037f70df", Action: "log"},
-					{ID: "7dfd111a6bad4b86bf3522cce6c5792f", Enabled: cf.BoolPtr(false), Action: "block"},
+					{ID: "7dfd111a6bad4b86bf3522cce6c5792f", Enabled: new(false), Action: "block"},
 				},
 			},
 		},
-		cf.RulesetRule{
-			Enabled: cf.BoolPtr(true),
-			ActionParameters: &cf.RulesetRuleActionParameters{
-				Overrides: &cf.RulesetRuleActionParametersOverrides{
-					Categories: []cf.RulesetRuleActionParametersCategories{
-						{Category: "log4j", Action: "managed_challenge"},
-						{Category: "wordpress", Enabled: cf.BoolPtr(false)},
-					},
-					Rules: []cf.RulesetRuleActionParametersRules{
-						{ID: "7dfd111a6bad4b86bf3522cce6c5792f", Enabled: cf.BoolPtr(false), Action: "block"},
-						{ID: "9f7e454e4cad45abbcc40696037f70df", Action: "log"},
-					},
-				},
-			},
-		}),
+		`{"action":"execute","expression":"true","enabled":true,"action_parameters":{
+		  "id":"77454fe2d30c4220b5701f6fdfb893ba",
+		  "overrides":{
+		    "categories":[{"category":"log4j","action":"managed_challenge"},{"category":"wordpress","enabled":false}],
+		    "rules":[{"id":"7dfd111a6bad4b86bf3522cce6c5792f","enabled":false,"action":"block"},
+		             {"id":"9f7e454e4cad45abbcc40696037f70df","action":"log"}]}}}`),
 )
