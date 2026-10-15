@@ -117,3 +117,86 @@ func TestLoadConfigRefuses(t *testing.T) {
 		})
 	}
 }
+
+// validRuleKind is a configuration with one rule kind that loadConfig accepts.
+const validRuleKind = `ruleKinds:
+  - kind: TransformRule
+    rule: rulesets.RewriteRuleParam
+    shortName: cftransform
+    noun: transform rule
+    doc: TransformRule transforms.
+    typeDoc: Type picks the phase.
+    types:
+      - {name: urlRewrite, phase: http_request_transform, doc: rewrites the URL}
+      - {name: responseHeaders, phase: http_response_headers_transform, doc: changes response headers}
+    samples:
+      - {type: urlRewrite, expression: 'true'}
+      - {type: responseHeaders, expression: 'true'}
+    fields:
+      headers: {key: name, keyDoc: Name is the header's name.}
+    rules:
+      - {rule: 'true', message: m, reason: r, invalid: {expression: 'true'}}
+    ignore:
+      logging: Not mapped.
+`
+
+func TestLoadConfigRefusesRuleKinds(t *testing.T) {
+	if _, err := loadConfig(writeConfig(t, validRuleKind)); err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	replace := func(old, new string) string {
+		if !strings.Contains(validRuleKind, old) {
+			t.Fatalf("validRuleKind has no %q", old)
+		}
+		return strings.Replace(validRuleKind, old, new, 1)
+	}
+	single := replace("    typeDoc: Type picks the phase.\n", "    phase: http_request_firewall_custom\n")
+	single = strings.Replace(single, "    types:\n      - {name: urlRewrite, phase: http_request_transform, doc: "+
+		"rewrites the URL}\n      - {name: responseHeaders, phase: http_response_headers_transform, doc: changes "+
+		"response headers}\n", "", 1)
+	single = strings.Replace(single, "      - {type: responseHeaders, expression: 'true'}\n", "", 1)
+	if _, err := loadConfig(writeConfig(t, single)); err != nil {
+		t.Fatalf("a rule kind with one phase: %v", err)
+	}
+	tests := []struct{ name, config, want string }{
+		{"a rule kind listed twice", validRuleKind + strings.TrimPrefix(validRuleKind, "ruleKinds:\n"), "listed twice"},
+		{"a rule kind named as a kind", validConfig + strings.NewReplacer("kind: TransformRule", "kind: KVNamespace",
+			"doc: TransformRule", "doc: KVNamespace").Replace(validRuleKind), "ruleKinds[0]: KVNamespace is listed twice"},
+		{"a kind that is not a Go name", replace("kind: TransformRule", "kind: transform-rule"), "not a Go type name"},
+		{"a rule without a type", replace("rule: rulesets.RewriteRuleParam", "rule: rulesets"), "not <package>.<type>"},
+		{"a short name in capitals", replace("shortName: cftransform", "shortName: CF"), "lower-case"},
+		{"no noun", replace("noun: transform rule", `noun: ""`), "noun is empty"},
+		{"a doc not starting with the kind", replace("doc: TransformRule transforms.", "doc: It transforms."),
+			"does not start with"},
+		{"both a phase and types", replace("    typeDoc:", "    phase: http_request_transform\n    typeDoc:"),
+			"set exactly one of phase and types"},
+		{"one type", replace("      - {name: responseHeaders, phase: http_response_headers_transform, doc: changes "+
+			"response headers}\n", ""), "types lists one type"},
+		{"types without a doc", replace("    typeDoc: Type picks the phase.\n", ""), "typeDoc is empty"},
+		{"a type doc without types", strings.Replace(single, "    phase:", "    typeDoc: x\n    phase:", 1),
+			"typeDoc is set without types"},
+		{"a sample missing", replace("      - {type: responseHeaders, expression: 'true'}\n", ""), "give 2 samples"},
+		{"a type that is not lowerCamel", replace("{name: urlRewrite,", "{name: URLRewrite,"), "not a lowerCamel name"},
+		{"a type listed twice", replace("{name: responseHeaders,", "{name: urlRewrite,"), "listed twice"},
+		{"a type without a phase", replace("phase: http_request_transform,", `phase: "",`), "phase is empty"},
+		{"a type without a doc", replace("doc: rewrites the URL}", `doc: ""}`), "doc is empty"},
+		{"a rule without a message", replace("message: m,", `message: "",`), "needs a rule and a message"},
+		{"a rule in double quotes", replace("rule: 'true',", `rule: 'self.a == "b"',`), "double quote"},
+		{"a rule without a reason", replace("reason: r,", `reason: "",`), "gives no reason"},
+		{"a rule without an invalid spec", replace("invalid: {expression: 'true'}", "invalid: {}"),
+			"gives no invalid spec"},
+		{"an ignore without a reason", replace("logging: Not mapped.", `logging: " "`), "gives no reason"},
+		{"a field both ignored and adjusted", replace("logging: Not mapped.", "headers: Not mapped."),
+			"both ignored and adjusted"},
+		{"a key without a doc", replace("{key: name, keyDoc: Name is the header's name.}", "{key: name}"),
+			"set key and keyDoc together"},
+		{"a key in capitals", replace("{key: name,", "{key: Name,"), "not a lowerCamel name"},
+		{"a validation without a reason", replace("{key: name, keyDoc: Name is the header's name.}",
+			"{validation: {minLength: 1}}"), "gives no reason"},
+	}
+	for _, tc := range tests {
+		if _, err := loadConfig(writeConfig(t, tc.config)); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want one containing %q", tc.name, err, tc.want)
+		}
+	}
+}

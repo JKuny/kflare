@@ -42,6 +42,27 @@ func loadTestService(t *testing.T, name string) *service {
 	return svc
 }
 
+var (
+	testRulesMu sync.Mutex
+	testRules   = map[string]*sdkRule{}
+)
+
+// loadTestRule loads a cloudflare-go v7 rule type once per test binary.
+func loadTestRule(t *testing.T, name string) *sdkRule {
+	t.Helper()
+	testRulesMu.Lock()
+	defer testRulesMu.Unlock()
+	if rule, ok := testRules[name]; ok {
+		return rule
+	}
+	rule, err := sdk{dir: "."}.rule(name)
+	if err != nil {
+		t.Fatalf("loading %s: %v", name, err)
+	}
+	testRules[name] = rule
+	return rule
+}
+
 // summary describes fields compactly, one string each.
 func summary(fields []sdkField) []string {
 	out := make([]string, 0, len(fields))

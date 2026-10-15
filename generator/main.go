@@ -20,6 +20,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -127,15 +128,38 @@ func generate(cfg *config, s sdk, spec *apiSpec, header string) (*outputs, error
 		}
 		controllers = append(controllers, c)
 	}
+	var ruleKinds []*ruleKind
+	for _, entry := range cfg.RuleKinds {
+		rule, err := s.rule(entry.Rule)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", entry.Kind, err)
+		}
+		k, err := buildRuleKind(entry, rule, spec)
+		if err != nil {
+			return nil, err
+		}
+		if err := out.addRuleKind(k, header); err != nil {
+			return nil, err
+		}
+		ruleKinds = append(ruleKinds, k)
+	}
 	slices.SortFunc(controllers, func(a, b *controller) int { return strings.Compare(a.name, b.name) })
-	src, err := emitKinds(controllers, header)
+	slices.SortFunc(ruleKinds, func(a, b *ruleKind) int { return strings.Compare(a.name, b.name) })
+	src, err := emitKinds(controllers, ruleKinds, header)
 	if err != nil {
 		return nil, err
 	}
 	out.files[kindsFile] = src
+	plurals := map[string]string{}
 	for _, c := range controllers {
-		out.blocks[crdKustomization] = append(out.blocks[crdKustomization], "- bases/kflare.dev_"+c.plural+".yaml")
-		out.blocks[helmRBAC] = append(out.blocks[helmRBAC], "- "+c.plural)
+		plurals[c.name] = c.plural
+	}
+	for _, k := range ruleKinds {
+		plurals[k.name] = k.plural
+	}
+	for _, name := range slices.Sorted(maps.Keys(plurals)) {
+		out.blocks[crdKustomization] = append(out.blocks[crdKustomization], "- bases/kflare.dev_"+plurals[name]+".yaml")
+		out.blocks[helmRBAC] = append(out.blocks[helmRBAC], "- "+plurals[name])
 	}
 	return out, nil
 }

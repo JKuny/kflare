@@ -68,6 +68,7 @@ type schema struct {
 	AllOf            []*schema          `json:"allOf"`
 	Enum             []any              `json:"enum"`
 	Default          any                `json:"default"`
+	Example          any                `json:"example"`
 	MinLength        *int64             `json:"minLength"`
 	MaxLength        *int64             `json:"maxLength"`
 	Pattern          string             `json:"pattern"`
@@ -77,6 +78,34 @@ type schema struct {
 	ExclusiveMaximum bool               `json:"exclusiveMaximum"`
 	// Sensitive is Stainless's mark for a secret, such as a password.
 	Sensitive bool `json:"x-sensitive"`
+
+	// The keywords of nested objects, lists and unions, which a rule kind's
+	// action parameters use.
+	OneOf    []*schema `json:"oneOf"`
+	AnyOf    []*schema `json:"anyOf"`
+	Required []string  `json:"required"`
+	Items    *schema   `json:"items"`
+	// AdditionalProperties is a schema, or a bool: see valueSchema.
+	AdditionalProperties json.RawMessage `json:"additionalProperties"`
+	MinProperties        *int64          `json:"minProperties"`
+	MaxProperties        *int64          `json:"maxProperties"`
+	MinItems             *int64          `json:"minItems"`
+	MaxItems             *int64          `json:"maxItems"`
+	UniqueItems          bool            `json:"uniqueItems"`
+	ReadOnly             bool            `json:"readOnly"`
+}
+
+// valueSchema returns the schema of the values of a map: the schema
+// additionalProperties holds, or nil when it is absent or a bool.
+func (sch *schema) valueSchema() (*schema, error) {
+	if len(sch.AdditionalProperties) == 0 || sch.AdditionalProperties[0] != '{' {
+		return nil, nil
+	}
+	value := &schema{}
+	if err := json.Unmarshal(sch.AdditionalProperties, value); err != nil {
+		return nil, fmt.Errorf("additionalProperties: %w", err)
+	}
+	return value, nil
 }
 
 // loadSpec reads the spec at path.
@@ -294,6 +323,8 @@ type fieldSpec struct {
 	// def is the default as a marker value, "" when there is none.
 	def       string
 	sensitive bool
+	// example is the schema's example of a value, nil when it gives none.
+	example any
 }
 
 // fieldSpec reads a property's schema, following $refs and allOf. A keyword
@@ -342,6 +373,9 @@ func (s *apiSpec) fieldSpec(prop *schema) (fieldSpec, error) {
 			out.def = literal
 		}
 		out.sensitive = out.sensitive || sch.Sensitive
+		if out.example == nil {
+			out.example = sch.Example
+		}
 		for _, part := range sch.AllOf {
 			if err := visit(part); err != nil {
 				return err
@@ -368,4 +402,80 @@ func defaultLiteral(value any) (string, error) {
 		return fmt.Sprintf("%d", int64(v)), nil
 	}
 	return "", fmt.Errorf("default %v is a %T, which kflare-gen cannot map yet", value, value)
+}
+
+// required returns the properties a schema requires, including those of the
+// schemas it combines with allOf.
+func (s *apiSpec) required(sch *schema) (map[string]bool, error) {
+	out := map[string]bool{}
+	var visit func(*schema) error
+	visit = func(sch *schema) error {
+		sch, err := s.resolve(sch)
+		if err != nil || sch == nil {
+			return err
+		}
+		for _, name := range sch.Required {
+			out[name] = true
+		}
+		for _, part := range sch.AllOf {
+			if err := visit(part); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return out, visit(sch)
+}
+
+// How a union's schema combines its variants: one of them exactly, or any
+// number of them.
+const (
+	combinatorOneOf = "oneOf"
+	combinatorAnyOf = "anyOf"
+)
+
+// alternatives returns how a union's schema combines its variants, oneOf or
+// anyOf, and the variants, resolved. The combinator may sit in one of the
+// schemas the union combines with allOf; "" when there is none.
+func (s *apiSpec) alternatives(sch *schema) (string, []*schema, error) {
+	if sch == nil {
+		return "", nil, nil
+	}
+	combinator, parts := "", []*schema(nil)
+	switch {
+	case len(sch.OneOf) > 0 && len(sch.AnyOf) > 0:
+		return "", nil, fmt.Errorf("the schema has both oneOf and anyOf")
+	case len(sch.OneOf) > 0:
+		combinator, parts = combinatorOneOf, sch.OneOf
+	case len(sch.AnyOf) > 0:
+		combinator, parts = combinatorAnyOf, sch.AnyOf
+	}
+	if combinator == "" {
+		for _, part := range sch.AllOf {
+			resolved, err := s.resolve(part)
+			if err != nil {
+				return "", nil, err
+			}
+			c, alts, err := s.alternatives(resolved)
+			if err != nil {
+				return "", nil, err
+			}
+			if c != "" {
+				if combinator != "" {
+					return "", nil, fmt.Errorf("the schema combines two unions")
+				}
+				combinator, parts = c, alts
+			}
+		}
+		return combinator, parts, nil
+	}
+	alternatives := make([]*schema, len(parts))
+	for i, part := range parts {
+		resolved, err := s.resolve(part)
+		if err != nil {
+			return "", nil, err
+		}
+		alternatives[i] = resolved
+	}
+	return combinator, alternatives, nil
 }

@@ -101,3 +101,49 @@ kinds:
     ignore:
       num_items: A number in the OpenAPI spec, not an integer.
       num_referencing_filters: A number in the OpenAPI spec, not an integer.
+
+# Rule kinds, each from a real cloudflare-go v7 rule type, for the shapes TransformRule does not have.
+ruleKinds:
+  # One phase; a required string with a pattern, nested objects, lists of objects, bools, integers, enums, and rules on
+  # how many fields an object sets.
+  - kind: TestExecuteRule
+    rule: rulesets.ExecuteRuleParam
+    shortName: testexecute
+    noun: execute rule
+    doc: TestExecuteRule deploys a managed ruleset, with every field of the execute rule's action parameters.
+    phase: http_request_firewall_managed
+    samples:
+      - expression: 'true'
+        id: 77454fe2d30c4220b5701f6fdfb893ba
+        overrides:
+          enabled: true
+          categories:
+            - category: wordpress
+              enabled: false
+          rules:
+            - id: 9f7e454e4cad45abbcc40696037f70df
+              action: log
+              scoreThreshold: 40
+    ignore:
+      logging: Not mapped by rule kinds yet.
+      ratelimit: Not mapped by rule kinds yet.
+      exposed_credential_check: Not mapped by rule kinds yet.
+
+  # Lists of scalars: sets of enum values and of strings with a pattern. A map of lists is ignored.
+  - kind: TestSkipRule
+    rule: rulesets.SkipRuleParam
+    shortName: testskip
+    noun: skip rule
+    doc: TestSkipRule skips rules, with the skip rule's action parameters but for the map of rules.
+    phase: http_request_firewall_custom
+    samples:
+      - expression: 'http.request.uri.path eq "/health"'
+        description: Skip the health check
+        phases: [http_request_sbfm, http_ratelimit]
+        products: [waf]
+        ruleset: current
+    ignore:
+      rules: A map of lists, which kflare-gen cannot map yet.
+      logging: Not mapped by rule kinds yet.
+      ratelimit: Not mapped by rule kinds yet.
+      exposed_credential_check: Not mapped by rule kinds yet.

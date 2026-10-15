@@ -46,6 +46,13 @@ const (
 	rateLimitPhase   = "http_ratelimit"
 	managedPhase     = "http_request_firewall_managed"
 
+	// urlRewritePhase, requestHeadersPhase and responseHeadersPhase are the
+	// Rulesets phases of TransformRules of type urlRewrite, requestHeaders and
+	// responseHeaders.
+	urlRewritePhase      = "http_request_transform"
+	requestHeadersPhase  = "http_request_late_transform"
+	responseHeadersPhase = "http_response_headers_transform"
+
 	// freeManagedRulesetID is the Cloudflare Free Managed Ruleset, the
 	// managed ruleset a Free zone can deploy.
 	freeManagedRulesetID = "77454fe2d30c4220b5701f6fdfb893ba"
@@ -87,6 +94,7 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		accountKey, tunnelKey, tunnelConfigKey, workerKey, zoneKey, recordKey client.ObjectKey
 		routeKey, exclusionKey, kvKey, bucketKey, wafKey, wafSkipKey          client.ObjectKey
 		rateLimitKey, listKey, listRuleKey, managedKey, d1Key                 client.ObjectKey
+		urlRewriteKey, requestHeadersKey, responseHeadersKey                  client.ObjectKey
 
 		tunnelID, zoneID, recordID, routeID, exclusionID, kvNamespaceID, listID, databaseID string
 	)
@@ -159,6 +167,9 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		listRuleKey = client.ObjectKey{Namespace: e2eNamespace, Name: "waf-list"}
 		managedKey = client.ObjectKey{Namespace: e2eNamespace, Name: "managed-ruleset"}
 		d1Key = client.ObjectKey{Namespace: e2eNamespace, Name: "d1"}
+		urlRewriteKey = client.ObjectKey{Namespace: e2eNamespace, Name: "url-rewrite"}
+		requestHeadersKey = client.ObjectKey{Namespace: e2eNamespace, Name: "request-headers"}
+		responseHeadersKey = client.ObjectKey{Namespace: e2eNamespace, Name: "response-headers"}
 
 		DeferCleanup(func() {
 			By("removing anything this run left behind in Cloudflare")
@@ -178,6 +189,11 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 					ruleRef("WAFCustomRule", wafSkipKey), ruleRef("WAFCustomRule", listRuleKey))
 				cleanupRules(ctx, cfAPI, ruleService, zoneID, rateLimitPhase, ruleRef("RateLimitRule", rateLimitKey))
 				cleanupRules(ctx, cfAPI, ruleService, zoneID, managedPhase, ruleRef("ManagedRuleset", managedKey))
+				cleanupRules(ctx, cfAPI, ruleService, zoneID, urlRewritePhase, ruleRef("TransformRule", urlRewriteKey))
+				cleanupRules(ctx, cfAPI, ruleService, zoneID, requestHeadersPhase,
+					ruleRef("TransformRule", requestHeadersKey))
+				cleanupRules(ctx, cfAPI, ruleService, zoneID, responseHeadersPhase,
+					ruleRef("TransformRule", responseHeadersKey))
 				// An entry point in the managed phase, even an empty one,
 				// stops Cloudflare's default deployment of the Free Managed
 				// Ruleset; deleting it restores the zone as found.
@@ -578,6 +594,90 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		expectIdle(ctx, k8s, cfAPI, zoneID, rateLimitPhase, rule)
 	})
 
+	It("writes a transform rule of each type to its phase, updates one in place and then leaves them alone", func() {
+		if zoneName == "" {
+			Skip("CF_E2E_ZONE is not set")
+		}
+		path := "/" + resourceName()
+		transformRule := func(key client.ObjectKey, typ string) *cloudflarev1alpha1.TransformRule {
+			return &cloudflarev1alpha1.TransformRule{
+				ObjectMeta: objectMeta(key),
+				Spec: cloudflarev1alpha1.TransformRuleSpec{
+					RulesetRuleSpec: cloudflarev1alpha1.RulesetRuleSpec{
+						ZoneRef:     corev1.LocalObjectReference{Name: zoneKey.Name},
+						Expression:  `starts_with(http.request.uri.path, "` + path + `")`,
+						Description: "kflare e2e " + run,
+					},
+					Type: typ,
+				},
+			}
+		}
+		urlRewrite := transformRule(urlRewriteKey, "urlRewrite")
+		urlRewrite.Spec.URI = &cloudflarev1alpha1.TransformRuleURI{
+			Path:  &cloudflarev1alpha1.TransformRuleURIPath{Value: path + "/rewritten"},
+			Query: &cloudflarev1alpha1.TransformRuleURIQuery{Value: new("")},
+		}
+		requestHeaders := transformRule(requestHeadersKey, "requestHeaders")
+		requestHeaders.Spec.Headers = []cloudflarev1alpha1.TransformRuleHeader{
+			{Name: "x-kflare-e2e", Operation: "set", Expression: "ip.src.country"},
+			{Name: "x-kflare-e2e-removed", Operation: "remove"},
+		}
+		responseHeaders := transformRule(responseHeadersKey, "responseHeaders")
+		responseHeaders.Spec.Headers = []cloudflarev1alpha1.TransformRuleHeader{
+			{Name: "x-kflare-e2e", Operation: "add", Value: run},
+			{Name: "x-frame-options", Operation: "set", Value: "DENY"},
+		}
+		for _, rule := range []*cloudflarev1alpha1.TransformRule{urlRewrite, requestHeaders, responseHeaders} {
+			Expect(k8s.Create(ctx, rule)).To(Succeed())
+		}
+		phases := map[string]string{"urlRewrite": urlRewritePhase, "requestHeaders": requestHeadersPhase,
+			"responseHeaders": responseHeadersPhase}
+		cfRules := map[string]cf.RulesetRule{}
+		for _, rule := range []*cloudflarev1alpha1.TransformRule{urlRewrite, requestHeaders, responseHeaders} {
+			key := client.ObjectKeyFromObject(rule)
+			expectReady(key, rule, func() []metav1.Condition { return rule.Status.Conditions })
+			ref := ruleRef("TransformRule", key)
+			Expect(rule.Status.CloudflareMetadata.Ref).To(Equal(ref))
+			cfRule, ok := ruleByRef(phaseRules(ctx, cfAPI, zoneID, phases[rule.Spec.Type]), ref)
+			Expect(ok).To(BeTrue(), "the %s phase has no rule with ref %s", phases[rule.Spec.Type], ref)
+			Expect(cfRule.ID).To(Equal(rule.Status.CloudflareMetadata.RuleID))
+			Expect(cfRule.Action).To(Equal("rewrite"))
+			Expect(cfRule.Expression).To(Equal(rule.Spec.Expression))
+			Expect(cfRule.Description).To(Equal(rule.Spec.Description))
+			Expect(cfRule.ActionParameters).NotTo(BeNil())
+			cfRules[rule.Spec.Type] = cfRule
+		}
+		Expect(cfRules["urlRewrite"].ActionParameters.URI).To(Equal(&cf.RulesetRuleActionParametersURI{
+			Path:  &cf.RulesetRuleActionParametersURIPath{Value: path + "/rewritten"},
+			Query: &cf.RulesetRuleActionParametersURIQuery{Value: new("")},
+		}))
+		type headers = map[string]cf.RulesetRuleActionParametersHTTPHeader
+		Expect(cfRules["requestHeaders"].ActionParameters.Headers).To(Equal(headers{
+			"x-kflare-e2e":         {Operation: "set", Expression: "ip.src.country"},
+			"x-kflare-e2e-removed": {Operation: "remove"},
+		}))
+		Expect(cfRules["responseHeaders"].ActionParameters.Headers).To(Equal(headers{
+			"x-kflare-e2e":    {Operation: "add", Value: run},
+			"x-frame-options": {Operation: "set", Value: "DENY"},
+		}))
+
+		By("changing a response header's value, which updates the rule in place")
+		patch := client.MergeFrom(responseHeaders.DeepCopy())
+		responseHeaders.Spec.Headers[0].Value = run + "-changed"
+		Expect(k8s.Patch(ctx, responseHeaders, patch)).To(Succeed())
+		ref := ruleRef("TransformRule", responseHeadersKey)
+		Eventually(func(g Gomega) {
+			updated, ok := ruleByRef(phaseRules(ctx, cfAPI, zoneID, responseHeadersPhase), ref)
+			g.Expect(ok).To(BeTrue(), "Cloudflare has no rule with ref %s", ref)
+			g.Expect(updated.ID).To(Equal(cfRules["responseHeaders"].ID))
+			g.Expect(updated.ActionParameters.Headers["x-kflare-e2e"].Value).To(Equal(run + "-changed"))
+		}, e2eTimeout, e2ePoll).Should(Succeed())
+
+		for _, rule := range []*cloudflarev1alpha1.TransformRule{urlRewrite, requestHeaders, responseHeaders} {
+			expectIdle(ctx, k8s, cfAPI, zoneID, phases[rule.Spec.Type], rule)
+		}
+	})
+
 	It("deploys the Free Managed Ruleset, updates its overrides in place and then leaves it alone", func() {
 		if zoneName == "" {
 			Skip("CF_E2E_ZONE is not set")
@@ -742,6 +842,9 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 			&cloudflarev1alpha1.WAFCustomRule{ObjectMeta: objectMeta(wafSkipKey)},
 			&cloudflarev1alpha1.RateLimitRule{ObjectMeta: objectMeta(rateLimitKey)},
 			&cloudflarev1alpha1.ManagedRuleset{ObjectMeta: objectMeta(managedKey)},
+			&cloudflarev1alpha1.TransformRule{ObjectMeta: objectMeta(urlRewriteKey)},
+			&cloudflarev1alpha1.TransformRule{ObjectMeta: objectMeta(requestHeadersKey)},
+			&cloudflarev1alpha1.TransformRule{ObjectMeta: objectMeta(responseHeadersKey)},
 			&cloudflarev1alpha1.WAFCustomRule{ObjectMeta: objectMeta(listRuleKey)},
 			&cloudflarev1alpha1.IPList{ObjectMeta: objectMeta(listKey)},
 			&cloudflarev1alpha1.DNSRecord{ObjectMeta: objectMeta(recordKey)},
@@ -791,6 +894,11 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 			}
 			_, ok := ruleByRef(phaseRules(ctx, cfAPI, zoneID, rateLimitPhase), ruleRef("RateLimitRule", rateLimitKey))
 			Expect(ok).To(BeFalse(), "the rate limiting rule was not deleted")
+			for phase, key := range map[string]client.ObjectKey{urlRewritePhase: urlRewriteKey,
+				requestHeadersPhase: requestHeadersKey, responseHeadersPhase: responseHeadersKey} {
+				_, ok := ruleByRef(phaseRules(ctx, cfAPI, zoneID, phase), ruleRef("TransformRule", key))
+				Expect(ok).To(BeFalse(), "the transform rule in %s was not deleted", phase)
+			}
 			_, err = cfAPI.GetEntrypointRuleset(ctx, cf.ZoneIdentifier(zoneID), managedPhase)
 			Expect(cfpkg.IsNotFound(err)).To(BeTrue(),
 				"the managed phase's emptied entry point was not deleted, which leaves Cloudflare's default off: %v", err)

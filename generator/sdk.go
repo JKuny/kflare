@@ -262,12 +262,14 @@ var errNoMethod = errors.New("no such method")
 // sdkReader reads types out of one loaded package.
 type sdkReader struct {
 	pkg *packages.Package
-	// specs indexes the package's type declarations by name.
-	specs map[string]*ast.TypeSpec
+	// specs indexes the package's type declarations by name, and typeDocs
+	// their documentation.
+	specs    map[string]*ast.TypeSpec
+	typeDocs map[string]string
 }
 
 func newSDKReader(pkg *packages.Package) *sdkReader {
-	r := &sdkReader{pkg: pkg, specs: map[string]*ast.TypeSpec{}}
+	r := &sdkReader{pkg: pkg, specs: map[string]*ast.TypeSpec{}, typeDocs: map[string]string{}}
 	for _, file := range pkg.Syntax {
 		for _, decl := range file.Decls {
 			gen, ok := decl.(*ast.GenDecl)
@@ -277,6 +279,11 @@ func newSDKReader(pkg *packages.Package) *sdkReader {
 			for _, spec := range gen.Specs {
 				if ts, ok := spec.(*ast.TypeSpec); ok {
 					r.specs[ts.Name.Name] = ts
+					doc := ts.Doc
+					if doc == nil && len(gen.Specs) == 1 {
+						doc = gen.Doc
+					}
+					r.typeDocs[ts.Name.Name] = strings.TrimSpace(doc.Text())
 				}
 			}
 		}
@@ -420,4 +427,130 @@ func (r *sdkReader) enumValues(t types.Type) []string {
 		}
 	}
 	return values
+}
+
+// sdkRule is what kflare-gen reads off cloudflare-go v7's type for a rule
+// with one action, such as rulesets.RewriteRuleParam.
+type sdkRule struct {
+	// name is the type as an entry names it.
+	name string
+	r    *sdkReader
+	typ  *types.Named
+	// fields are the rule type's fields, inside their param.Field.
+	fields []sdkField
+	// action is the one action the rule type allows, such as rewrite.
+	action string
+	// params is the struct of the rule's action parameters.
+	params *types.Named
+}
+
+// rule loads the rule type an entry names.
+func (s sdk) rule(name string) (*sdkRule, error) {
+	dot := strings.LastIndex(name, ".")
+	if dot <= 0 || dot == len(name)-1 {
+		return nil, fmt.Errorf("rule %q is not <package>.<type>", name)
+	}
+	path, typeName := sdkModule+"/"+name[:dot], name[dot+1:]
+	pkgs, err := packages.Load(&packages.Config{
+		Mode: packages.NeedName | packages.NeedFiles | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo,
+		Dir:  s.dir,
+	}, path)
+	if err != nil {
+		return nil, fmt.Errorf("loading %s: %w", path, err)
+	}
+	if len(pkgs) != 1 {
+		return nil, fmt.Errorf("loading %s: got %d packages", path, len(pkgs))
+	}
+	pkg := pkgs[0]
+	if len(pkg.Errors) > 0 {
+		return nil, fmt.Errorf("loading %s: %v", path, pkg.Errors[0])
+	}
+	obj, ok := pkg.Types.Scope().Lookup(typeName).(*types.TypeName)
+	if !ok {
+		return nil, fmt.Errorf("%s has no type %s", path, typeName)
+	}
+	named, ok := obj.Type().(*types.Named)
+	if !ok {
+		return nil, fmt.Errorf("%s is not a named type", name)
+	}
+	r := newSDKReader(pkg)
+	fields, err := r.fields(named, true)
+	if err != nil {
+		return nil, err
+	}
+	rule := &sdkRule{name: name, r: r, typ: named, fields: fields}
+	for _, f := range fields {
+		switch f.apiName {
+		case ruleAction:
+			if len(f.enum) != 1 {
+				return nil, fmt.Errorf("%s's action allows %d actions, not one: it is not a rule type for one action",
+					name, len(f.enum))
+			}
+			rule.action = f.enum[0]
+		case ruleActionParameters:
+			params, ok := f.typ.(*types.Named)
+			if _, isStruct := f.typ.Underlying().(*types.Struct); !ok || !isStruct || params.Obj().Pkg() != pkg.Types {
+				return nil, fmt.Errorf("%s's action parameters are a %s, not a struct of %s", name, f.typ, path)
+			}
+			rule.params = params
+		}
+	}
+	if rule.action == "" || rule.params == nil {
+		return nil, fmt.Errorf("%s has no action, or no action parameters", name)
+	}
+	return rule, nil
+}
+
+// constantNamed returns the name of the package's constant of type t whose
+// value is value, such as RulesetNewParamsRulesActionRewrite for t
+// RulesetNewParamsRulesAction and value rewrite.
+func (r *sdkReader) constantNamed(t, value string) (string, error) {
+	obj, ok := r.pkg.Types.Scope().Lookup(t).(*types.TypeName)
+	if !ok {
+		return "", fmt.Errorf("%s has no type %s", r.pkg.PkgPath, t)
+	}
+	scope := r.pkg.Types.Scope()
+	for _, name := range scope.Names() {
+		c, ok := scope.Lookup(name).(*types.Const)
+		if ok && types.Identical(c.Type(), obj.Type()) && constant.StringVal(c.Val()) == value {
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("%s has no %s constant %q", r.pkg.PkgPath, t, value)
+}
+
+// variants returns the structs of the package that satisfy the union
+// interface union, sorted by name.
+func (r *sdkReader) variants(union *types.Named) []*types.Named {
+	iface, ok := union.Underlying().(*types.Interface)
+	if !ok {
+		return nil
+	}
+	var out []*types.Named
+	scope := r.pkg.Types.Scope()
+	for _, name := range scope.Names() {
+		obj, ok := scope.Lookup(name).(*types.TypeName)
+		if !ok {
+			continue
+		}
+		named, ok := obj.Type().(*types.Named)
+		if !ok {
+			continue
+		}
+		if _, isStruct := named.Underlying().(*types.Struct); isStruct && types.Implements(named, iface) {
+			out = append(out, named)
+		}
+	}
+	return out
+}
+
+// isUnion reports whether t is a union of the package: an interface its
+// variants satisfy through an unexported method.
+func (r *sdkReader) isUnion(t types.Type) (*types.Named, bool) {
+	named, ok := t.(*types.Named)
+	if !ok || named.Obj().Pkg() != r.pkg.Types {
+		return nil, false
+	}
+	iface, ok := named.Underlying().(*types.Interface)
+	return named, ok && iface.NumMethods() > 0
 }

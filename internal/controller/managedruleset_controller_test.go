@@ -285,6 +285,15 @@ var _ = Describe("ManagedRuleset Controller", func() {
 			deleted.Status.CloudflareMetadata.ZoneID = ""
 			Expect(r.rules().rulesInZoneOfDeleted(ctx, deleted)).To(HaveLen(3))
 			Expect(r.rules().rulesInZoneOfDeleted(ctx, &cloudflarev1alpha1.Zone{})).To(BeEmpty())
+
+			By("watching the deletions of the kinds in the phase, each once, and no others")
+			kinds := managedRulesetKind.deletionsWatched()
+			watched := make([]string, 0, len(kinds))
+			for _, kind := range kinds {
+				watched = append(watched, kind.name)
+			}
+			Expect(watched).To(Equal([]string{managedRulesetKind.name}))
+			Expect(wafCustomRuleKind.deletionsWatched()).To(BeEmpty())
 		})
 	})
 

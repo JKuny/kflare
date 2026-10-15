@@ -10,6 +10,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/cloudflare/cloudflare-go/v7/rulesets"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -224,7 +225,7 @@ var _ = Describe("RateLimitRule Controller", func() {
 			Expect(fake.entrypointIn(phase).rules).To(HaveLen(1))
 			Expect(fake.entrypoint().rules).To(HaveLen(1))
 			Expect(fake.entrypoint().rules[0].ref()).To(Equal(rulesetRuleRef("WAFCustomRule", ns, "a")))
-			peers, err := r.rules().peers(ctx, rulesTestZone)
+			peers, err := r.rules().peers(ctx, rulesTestZone, rulesets.PhaseHTTPRatelimit)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(peers).To(ConsistOf(rulesetRulePeer{
 				ref: rulesetRuleRef("RateLimitRule", ns, "a"), priority: 10,

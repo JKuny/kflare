@@ -26,14 +26,29 @@ func SetupGeneratedReconcilers(mgr ctrl.Manager) error {
 	if err := (&KVNamespaceReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setting up the KVNamespace controller: %w", err)
 	}
+	if err := (&TransformRuleReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setting up the TransformRule controller: %w", err)
+	}
 	return nil
 }
 
-// generatedAccountDependents are the generated kinds, whose resources use a
-// CloudflareAccount's credentials directly.
+// generatedAccountDependents are the generated kinds that the shared CRUD
+// reconciler drives, whose resources use a CloudflareAccount's credentials
+// directly.
 var generatedAccountDependents = []dependentKind{
 	dependents("D1Database", func() client.ObjectList { return &cloudflarev1alpha1.D1DatabaseList{} },
 		func(obj *cloudflarev1alpha1.D1Database) []string { return []string{obj.Spec.AccountRef.Name} }),
 	dependents("KVNamespace", func() client.ObjectList { return &cloudflarev1alpha1.KVNamespaceList{} },
 		func(obj *cloudflarev1alpha1.KVNamespace) []string { return []string{obj.Spec.AccountRef.Name} }),
+}
+
+// generatedRulesetRuleKinds are the generated rule kinds, which the shared rule
+// controller drives.
+var generatedRulesetRuleKinds = []rulesetRuleKind{transformRuleKind}
+
+// generatedZoneDependents are the generated rule kinds, whose resources
+// reference a Zone in their namespace.
+var generatedZoneDependents = []dependentKind{
+	dependents("TransformRule", func() client.ObjectList { return &cloudflarev1alpha1.TransformRuleList{} },
+		func(obj *cloudflarev1alpha1.TransformRule) []string { return []string{obj.Spec.ZoneRef.Name} }),
 }

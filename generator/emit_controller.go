@@ -718,28 +718,55 @@ func goValue(f *goFile, sf field, value any) string {
 }
 
 // emitKinds returns the Go source of what registers the generated kinds: the
-// function cmd/main.go sets their reconcilers up with, and their entries as
-// dependents of their account.
-func emitKinds(kinds []*controller, header string) ([]byte, error) {
+// function cmd/main.go sets their reconcilers up with, the CRUD kinds'
+// entries as dependents of their account, and the rule kinds, which the
+// shared rule controller lists, as dependents of their Zone.
+func emitKinds(kinds []*controller, ruleKinds []*ruleKind, header string) ([]byte, error) {
 	f := newGoFile()
 	ctrl := f.use("sigs.k8s.io/controller-runtime", "ctrl")
+	client := f.use(clientPackage, "client")
 	comment(&f.Builder, "", wrap("SetupGeneratedReconcilers registers the reconciler of every kind kflare-gen "+
 		"generates with mgr."))
 	f.printf("func SetupGeneratedReconcilers(mgr %s.Manager) error {\n", ctrl)
+	names := make([]string, 0, len(kinds)+len(ruleKinds))
 	for _, c := range kinds {
+		names = append(names, c.name)
+	}
+	for _, k := range ruleKinds {
+		names = append(names, k.name)
+	}
+	for _, name := range slices.Sorted(slices.Values(names)) {
 		f.printf("if err := (&%sReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); "+
-			"err != nil {\nreturn %s.Errorf(\"setting up the %s controller: %%w\", err)\n}\n", c.name,
-			f.use("fmt", "fmt"), c.name)
+			"err != nil {\nreturn %s.Errorf(\"setting up the %s controller: %%w\", err)\n}\n", name,
+			f.use("fmt", "fmt"), name)
 	}
 	f.printf("return nil\n}\n\n")
 
-	comment(&f.Builder, "", wrap("generatedAccountDependents are the generated kinds, whose resources use a "+
-		"CloudflareAccount's credentials directly."))
+	comment(&f.Builder, "", wrap("generatedAccountDependents are the generated kinds that the shared CRUD "+
+		"reconciler drives, whose resources use a CloudflareAccount's credentials directly."))
 	f.printf("var generatedAccountDependents = []dependentKind{\n")
 	for _, c := range kinds {
-		f.printf("dependents(%q, func() %s.ObjectList { return &%s.%sList{} },\n", c.name, f.use(clientPackage, "client"),
-			f.api(), c.name)
+		f.printf("dependents(%q, func() %s.ObjectList { return &%s.%sList{} },\n", c.name, client, f.api(), c.name)
 		f.printf("func(obj *%s.%s) []string { return []string{obj.Spec.AccountRef.Name} }),\n", f.api(), c.name)
+	}
+	f.printf("}\n\n")
+
+	comment(&f.Builder, "", wrap("generatedRulesetRuleKinds are the generated rule kinds, which the shared rule "+
+		"controller drives."))
+	f.printf("var generatedRulesetRuleKinds = []rulesetRuleKind{")
+	for i, k := range ruleKinds {
+		if i > 0 {
+			f.printf(", ")
+		}
+		f.printf("%sKind", k.varName)
+	}
+	f.printf("}\n\n")
+	comment(&f.Builder, "", wrap("generatedZoneDependents are the generated rule kinds, whose resources reference "+
+		"a Zone in their namespace."))
+	f.printf("var generatedZoneDependents = []dependentKind{\n")
+	for _, k := range ruleKinds {
+		f.printf("dependents(%q, func() %s.ObjectList { return &%s.%sList{} },\n", k.name, client, f.api(), k.name)
+		f.printf("func(obj *%s.%s) []string { return []string{obj.Spec.ZoneRef.Name} }),\n", f.api(), k.name)
 	}
 	f.printf("}\n")
 	return f.source(header)

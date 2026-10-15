@@ -17,7 +17,11 @@ import (
 
 // config is generator/generator.yaml: one entry per kind kflare-gen generates.
 type config struct {
+	// Kinds are the kinds the shared CRUD reconciler drives.
 	Kinds []kindConfig `json:"kinds"`
+	// RuleKinds are the kinds whose resources each manage one rule in a zone's
+	// Rulesets phase, which the shared rule controller drives.
+	RuleKinds []ruleKindConfig `json:"ruleKinds,omitempty"`
 }
 
 // kindConfig is one kind's entry. Every field of the kind's cloudflare-go v7
@@ -166,7 +170,7 @@ func loadConfig(path string) (*config, error) {
 // validate checks what can be checked without the SDK. Field names are
 // checked against the SDK when the kind is built.
 func (c *config) validate() error {
-	if len(c.Kinds) == 0 {
+	if len(c.Kinds) == 0 && len(c.RuleKinds) == 0 {
 		return fmt.Errorf("no kinds")
 	}
 	seen := map[string]bool{}
@@ -176,6 +180,15 @@ func (c *config) validate() error {
 		}
 		if seen[k.Kind] {
 			return fmt.Errorf("kinds[%d]: %s is listed twice", i, k.Kind)
+		}
+		seen[k.Kind] = true
+	}
+	for i, k := range c.RuleKinds {
+		if err := k.validate(); err != nil {
+			return fmt.Errorf("ruleKinds[%d] (%s): %w", i, k.Kind, err)
+		}
+		if seen[k.Kind] {
+			return fmt.Errorf("ruleKinds[%d]: %s is listed twice", i, k.Kind)
 		}
 		seen[k.Kind] = true
 	}
@@ -260,6 +273,185 @@ func (v *validationConfig) validate() error {
 	}
 	if _, err := regexp.Compile(v.Pattern); err != nil {
 		return fmt.Errorf("the pattern does not compile: %w", err)
+	}
+	return nil
+}
+
+// ruleKindConfig is the entry of a rule kind: a kind whose resources each
+// manage one rule in a zone's entry point ruleset for a Rulesets phase,
+// through the shared rule controller. Its spec holds the fields every rule
+// kind shares (RulesetRuleSpec) and the parameters of its action, which
+// kflare-gen builds from cloudflare-go v7's rule type for the action. Every
+// field of the action parameters becomes a field of the spec (fields are
+// opt-out), except those the entry ignores.
+type ruleKindConfig struct {
+	// Kind is the API type's name, such as TransformRule.
+	Kind string `json:"kind"`
+	// Rule is cloudflare-go v7's type for a rule with the kind's action, as
+	// <package>.<type>: rulesets.RewriteRuleParam. The action it allows is
+	// the kind's, and its action parameters give the kind's fields.
+	Rule string `json:"rule"`
+	// ShortName is the kind's short name for kubectl, such as cftransform.
+	ShortName string `json:"shortName"`
+	// Noun is what docs and messages call the rule, such as "transform rule".
+	Noun string `json:"noun"`
+	// Doc is the kind's documentation, from the type's name on.
+	Doc string `json:"doc"`
+	// Phase is the Rulesets phase of the kind's rules, when they all go in
+	// one, such as http_request_firewall_custom.
+	Phase string `json:"phase,omitempty"`
+	// Types, when the kind's rules go in several phases, are the values of
+	// the immutable spec field type, which picks each resource's phase.
+	Types []ruleTypeConfig `json:"types,omitempty"`
+	// TypeDoc documents the type field, before the list of its values.
+	TypeDoc string `json:"typeDoc,omitempty"`
+	// Samples are valid specs, as a resource sets them, zoneRef aside: one
+	// for each type, in the order of Types, or one. config/samples holds them
+	// and the generated specs start from them.
+	Samples []map[string]any `json:"samples"`
+	// Fields adjusts fields of the action parameters, by their path of API
+	// names, such as uri.path.
+	Fields map[string]ruleFieldConfig `json:"fields,omitempty"`
+	// Rules are CEL rules on the spec, for what Cloudflare refuses that its
+	// API description does not say.
+	Rules []ruleConfig `json:"rules,omitempty"`
+	// Ignore leaves out fields of the rule type or of its action parameters,
+	// by path, each with the reason.
+	Ignore map[string]string `json:"ignore,omitempty"`
+}
+
+// ruleTypeConfig is one value of a rule kind's type field.
+type ruleTypeConfig struct {
+	// Name is the value, such as urlRewrite.
+	Name string `json:"name"`
+	// Phase is the Rulesets phase it picks, such as http_request_transform.
+	Phase string `json:"phase"`
+	// Doc says what a rule of the type does, for the type field's doc.
+	Doc string `json:"doc"`
+}
+
+// ruleFieldConfig adjusts one field of a rule kind's action parameters.
+type ruleFieldConfig struct {
+	// Doc replaces the SDK's documentation of the field.
+	Doc string `json:"doc,omitempty"`
+	// Key, for a map, names the field that holds an entry's key: the spec
+	// lists the map's values, each with its key in this field, keyed by it.
+	Key string `json:"key,omitempty"`
+	// KeyDoc documents the key field.
+	KeyDoc string `json:"keyDoc,omitempty"`
+	// Validation replaces what the OpenAPI spec says the field's value may
+	// be.
+	Validation *validationConfig `json:"validation,omitempty"`
+}
+
+// ruleConfig is a CEL rule on a rule kind's spec.
+type ruleConfig struct {
+	// Rule is the CEL expression, on the spec. It quotes strings with single
+	// quotes: a kubebuilder marker holds it in double quotes.
+	Rule string `json:"rule"`
+	// Message is what a resource that breaks the rule is refused with.
+	Message string `json:"message"`
+	// Reason says why the rule is there: what Cloudflare refuses, and when
+	// that was verified.
+	Reason string `json:"reason"`
+	// Invalid is a spec the rule refuses, zoneRef aside: a generated spec
+	// checks that the CRD refuses it with Message.
+	Invalid map[string]any `json:"invalid"`
+}
+
+// typeValue is a type field's value: a lowerCamel name.
+var typeValue = regexp.MustCompile(`^[a-z][A-Za-z0-9]*$`)
+
+func (k *ruleKindConfig) validate() error {
+	switch {
+	case !kindName.MatchString(k.Kind):
+		return fmt.Errorf("kind %q is not a Go type name", k.Kind)
+	case strings.Count(k.Rule, ".") == 0 || strings.HasPrefix(k.Rule, ".") || strings.HasSuffix(k.Rule, "."):
+		return fmt.Errorf("rule %q is not <package>.<type>", k.Rule)
+	case !shortName.MatchString(k.ShortName):
+		return fmt.Errorf("shortName %q is not lower-case letters and digits", k.ShortName)
+	case strings.TrimSpace(k.Noun) == "":
+		return fmt.Errorf("noun is empty")
+	case !strings.HasPrefix(k.Doc, k.Kind+" "):
+		return fmt.Errorf("doc does not start with %q", k.Kind+" ")
+	case (k.Phase == "") == (len(k.Types) == 0):
+		return fmt.Errorf("set exactly one of phase and types")
+	case len(k.Types) == 1:
+		return fmt.Errorf("types lists one type: set phase instead")
+	case len(k.Types) > 0 && strings.TrimSpace(k.TypeDoc) == "":
+		return fmt.Errorf("typeDoc is empty")
+	case len(k.Types) == 0 && k.TypeDoc != "":
+		return fmt.Errorf("typeDoc is set without types")
+	case len(k.Samples) != max(len(k.Types), 1):
+		return fmt.Errorf("give %d samples, one for each type, in their order", max(len(k.Types), 1))
+	}
+	if err := k.validateTypes(); err != nil {
+		return err
+	}
+	if err := k.validateRules(); err != nil {
+		return err
+	}
+	return k.validateFields()
+}
+
+// validateTypes checks a rule kind's types.
+func (k *ruleKindConfig) validateTypes() error {
+	seen := map[string]bool{}
+	for i, t := range k.Types {
+		switch {
+		case !typeValue.MatchString(t.Name):
+			return fmt.Errorf("types[%d]: name %q is not a lowerCamel name", i, t.Name)
+		case seen[t.Name]:
+			return fmt.Errorf("types[%d]: %s is listed twice", i, t.Name)
+		case t.Phase == "":
+			return fmt.Errorf("types[%d]: phase is empty", i)
+		case strings.TrimSpace(t.Doc) == "":
+			return fmt.Errorf("types[%d]: doc is empty", i)
+		}
+		seen[t.Name] = true
+	}
+	return nil
+}
+
+// validateRules checks a rule kind's CEL rules.
+func (k *ruleKindConfig) validateRules() error {
+	for i, r := range k.Rules {
+		switch {
+		case strings.TrimSpace(r.Rule) == "" || strings.TrimSpace(r.Message) == "":
+			return fmt.Errorf("rules[%d]: needs a rule and a message", i)
+		case strings.ContainsAny(r.Rule+r.Message, "\"`"):
+			return fmt.Errorf("rules[%d]: holds a double quote or a backquote; quote strings with single quotes", i)
+		case strings.TrimSpace(r.Reason) == "":
+			return fmt.Errorf("rules[%d]: gives no reason", i)
+		case len(r.Invalid) == 0:
+			return fmt.Errorf("rules[%d]: gives no invalid spec", i)
+		}
+	}
+	return nil
+}
+
+// validateFields checks a rule kind's ignored and adjusted fields.
+func (k *ruleKindConfig) validateFields() error {
+	for name, reason := range k.Ignore {
+		if strings.TrimSpace(reason) == "" {
+			return fmt.Errorf("ignore.%s gives no reason", name)
+		}
+		if _, ok := k.Fields[name]; ok {
+			return fmt.Errorf("%s is both ignored and adjusted in fields", name)
+		}
+	}
+	for name, f := range k.Fields {
+		if (f.Key == "") != (f.KeyDoc == "") {
+			return fmt.Errorf("fields.%s: set key and keyDoc together", name)
+		}
+		if f.Key != "" && !statusName.MatchString(f.Key) {
+			return fmt.Errorf("fields.%s: key %q is not a lowerCamel name", name, f.Key)
+		}
+		if f.Validation != nil {
+			if err := f.Validation.validate(); err != nil {
+				return fmt.Errorf("fields.%s.validation: %w", name, err)
+			}
+		}
 	}
 	return nil
 }
