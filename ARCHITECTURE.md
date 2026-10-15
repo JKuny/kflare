@@ -46,9 +46,10 @@ Every controller follows the same shape:
 5. Compare the spec with what Cloudflare reported, and write to Cloudflare only when they differ.
 6. Record IDs and metadata in status and set `Ready=True`.
 
-The kinds kflare-gen generates, KVNamespace so far, run this loop through the shared CRUD reconciler
+The kinds kflare-gen generates, KVNamespace and D1Database so far, run this loop through the shared CRUD reconciler
 (`internal/controller/crudresource_controller.go`). A generated kind only describes its Cloudflare calls, its adoption
-key, what it compares and what depends on it. kflare-gen writes that description from the kind's entry in
+key, what it compares and what depends on it. Adoption finds the object in the account's list by its key, then reads it
+by its ID: a list may show less than a read, as D1's does. kflare-gen writes that description from the kind's entry in
 `generator/generator.yaml`, cloudflare-go v7 and Cloudflare's OpenAPI spec: its API types
 (`api/v1alpha1/zz_generated.<kind>_types.go`), its controller (`internal/controller/zz_generated.<kind>.go`), and a
 table of envtest specs that the shared CRUD specs run on (`zz_generated.<kind>_test.go`). The generated kinds register
@@ -91,6 +92,7 @@ What each controller compares when it does reconcile:
 | `WorkerScript` | Cloudflare's `modified_on` timestamp, because its etag does not change for binding-only edits; the IDs of bound KVNamespaces, so a recreated namespace re-uploads the Worker |
 | `KVNamespace` | Title (renamed in place); recreated, empty, if deleted externally |
 | `IPList` | Description, updated in place, and items, compared as a set in canonical form (Cloudflare stores 203.0.113.7/32 as 203.0.113.7, IPv6 in lowercase and compressed) and replaced as a whole. Cloudflare applies a replace in the background: the IPList reports `ReplacingItems` and checks every 2 seconds until it is done. Recreated if deleted externally |
+| `D1Database` | Existence only: recreated, empty, if deleted externally. Its name, jurisdiction and location hint are fixed at creation |
 | `R2Bucket` | Existence only: recreated, empty, if deleted externally. Its name cannot change and its location is fixed at creation. Workers bind a bucket by name, so they keep working with the recreated bucket without a re-upload (verified live) |
 | `WorkerRoute` | Pattern and the Worker it runs; recreated if deleted externally, including when Cloudflare deletes it together with its Worker |
 | `WAFCustomRule`, `RateLimitRule`, `ManagedRuleset` | The rule's whole definition: expression, action and its parameters, enabled, description, for a rate limiting rule how it counts (characteristics, period, requests per period, mitigation timeout, counting expression, origin requests only), and for a managed ruleset deployment the ruleset and its overrides. Also its place among kflare's rules in the zone and phase (see [Rules](#rules)). Recreated if deleted externally |
@@ -114,15 +116,17 @@ retain policy first (see [Deletion](#deletion)).
 | `WorkerScript` | No lookup. The first reconcile uploads the script, replacing any existing Worker with the same name. |
 | `KVNamespace` | The namespace with the same title in the account (titles are unique per account) unless another KVNamespace manages it, in which case it reports `TitleConflict` and retries every minute. |
 | `IPList` | The IP list named `spec.name` in the account (names are unique per account, across list kinds) unless another IPList manages it, or the name belongs to a list of another kind: either way it reports `NameConflict` and retries every minute. |
+| `D1Database` | The database named `spec.name` in the account (names are unique per account) unless another D1Database manages it, in which case it reports `NameConflict` and retries every minute. An adopted database keeps its jurisdiction and location; `spec.jurisdiction` and `spec.primaryLocationHint` only apply when kflare creates the database. |
 | `R2Bucket` | The bucket named `spec.name` in the account's default jurisdiction (names are unique per account) unless another R2Bucket for the same Cloudflare account manages it, in which case it reports `NameConflict` and retries every minute. An adopted bucket keeps its location; `spec.locationHint` only applies when kflare creates the bucket. |
 | `WorkerRoute` | The route with the same pattern in the zone (patterns are unique per zone) unless another WorkerRoute manages it, in which case the WorkerRoute reports `PatternConflict` and retries every minute. |
 | `WAFCustomRule`, `RateLimitRule`, `ManagedRuleset` | Nothing. A rule is kflare's only if it carries the ref kflare derives for the resource (see [Rules](#rules)); rules created outside kflare are never touched. A zone deploys a managed ruleset at most once, so while a rule kflare does not manage deploys it, the ManagedRuleset reports `RulesetConflict` and checks again every minute. |
 
-### DNSRecord, WorkerRoute, KVNamespace, IPList and R2Bucket ownership
+### DNSRecord, WorkerRoute, KVNamespace, D1Database, IPList and R2Bucket ownership
 
 DNSRecord stores the Cloudflare record ID it manages in the `kflare.dev/record-id` label, WorkerRoute its route ID in
-`kflare.dev/route-id`, KVNamespace its namespace ID in `kflare.dev/kv-namespace-id` and IPList its list ID in
-`kflare.dev/ip-list-id`; each claims the object before doing anything else with it (`internal/controller/ownership.go`).
+`kflare.dev/route-id`, KVNamespace its namespace ID in `kflare.dev/kv-namespace-id`, D1Database its database ID in
+`kflare.dev/d1-database-id` and IPList its list ID in `kflare.dev/ip-list-id`; each claims the object before doing
+anything else with it (`internal/controller/ownership.go`).
 Adoption skips any object another resource of the same kind already carries in its label, across all namespaces,
 because two Zone resources in different namespaces can point at the same Cloudflare zone. Cloudflare record tags would be
 a Cloudflare-side alternative, but they are only available on paid plans.
@@ -233,6 +237,7 @@ Per-resource details:
   still references it reports `WorkerScriptNotFound` and recreates its route once the Worker is uploaded again.
 - **KVNamespace** deletion deletes the namespace **and all of its data**. Set the retain policy on namespaces holding data
   you need to keep.
+- **D1Database** deletion deletes the database **and all of its data**, likewise.
 - **WAFCustomRule** and **RateLimitRule** deletion deletes the resource's rule, found by its ref. The zone's other
   rules and its entry point stay.
 - **ManagedRuleset** deletion deletes its `execute` rule, and with it the phase's entry point once no rule is left in
@@ -272,9 +277,9 @@ hang, and leaves its Cloudflare object in place.
 - **Drift is not corrected promptly.** Out-of-band changes wait for the next trigger, at worst the 10-hour resync. A
   configurable periodic requeue on successful reconciles would bound this; it needs to stay within Cloudflare's API
   rate limits when many resources are managed.
-- **Adoption is implicit.** Zone, DNSRecord, Tunnel, WorkerRoute, KVNamespace, R2Bucket and IPList adopt matching
-  objects automatically, WorkerScript overwrites a same-named Worker, and the default deletion policy applies to adopted
-  objects. An explicit opt-in for adopting objects kflare did not create would make this safer.
+- **Adoption is implicit.** Zone, DNSRecord, Tunnel, WorkerRoute, KVNamespace, D1Database, R2Bucket and IPList adopt
+  matching objects automatically, WorkerScript overwrites a same-named Worker, and the default deletion policy applies
+  to adopted objects. An explicit opt-in for adopting objects kflare did not create would make this safer.
 - **No ownership marker on the Cloudflare side, except for rules.** kflare tracks what it owns only in Kubernetes, so if
   the cluster's resources are lost, it cannot tell its objects apart from anyone else's. Rules are the exception: their
   ref marks them (see [Rules](#rules)).

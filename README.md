@@ -32,6 +32,8 @@ Early development. Phase 1 (foundation) and Phase 2 (core resources) are complet
 
 - `R2Bucket` — creates or adopts an R2 bucket, with an optional location hint; WorkerScripts bind it with `r2BucketRef`. kflare never deletes objects: a bucket that still holds any is kept and reported as `BucketNotEmpty` (see [the sample](config/samples/cloudflare_v1alpha1_r2bucket.yaml))
 
+- `D1Database` — creates or adopts a D1 database, optionally restricted to a jurisdiction or placed by a location hint; the first kind generated end to end by kflare-gen, from Cloudflare's Go SDK and API schema (see [the sample](config/samples/cloudflare_v1alpha1_d1database.yaml))
+
 - `WAFCustomRule` — manages one WAF custom rule in a `Zone` (block, challenge, skip or log), kept in `spec.priority` order among kflare's rules; rules created outside kflare are left alone (see [the sample](config/samples/cloudflare_v1alpha1_wafcustomrule.yaml))
 
 - `RateLimitRule` — manages one rate limiting rule in a `Zone`: counts the requests its expression matches per client IP address (or other characteristics on higher plans) and blocks or challenges a client that goes over the limit, optionally with a custom response (see [the sample](config/samples/cloudflare_v1alpha1_ratelimitrule.yaml))
@@ -40,7 +42,7 @@ Early development. Phase 1 (foundation) and Phase 2 (core resources) are complet
 
 - `ManagedRuleset` — deploys a Cloudflare managed ruleset to a `Zone`, such as the Free Managed Ruleset, with overrides for the whole ruleset, a category or a single rule; deleting the last one hands the zone back to Cloudflare's default deployment (see [the sample](config/samples/cloudflare_v1alpha1_managedruleset.yaml))
 
-**Planned next:** more of Phase 3 — a code generator that builds CRDs and controllers from Cloudflare's Go SDK and API schema, which then produces the rules that replace Page Rules (transform, redirect, cache, configuration and origin rules) and more resources; Zero Trust and managed transforms; load balancers last (see [CLAUDE.md](./CLAUDE.md)).
+**Planned next:** more of Phase 3 — the code generator, which builds CRDs and controllers from Cloudflare's Go SDK and API schema (KVNamespace and D1Database so far), producing the rules that replace Page Rules (transform, redirect, cache, configuration and origin rules) and more resources; Zero Trust and managed transforms; load balancers last (see [CLAUDE.md](./CLAUDE.md)).
 
 ## Install
 
@@ -68,6 +70,7 @@ For working on kflare itself:
   - `WorkerRoute` also needs the zone-level **Workers Routes: Edit** permission
   - `KVNamespace` also needs the account-level **Workers KV Storage: Edit** permission
   - `R2Bucket` also needs the account-level **Workers R2 Storage: Edit** permission
+  - `D1Database` also needs the account-level **D1: Edit** permission
   - `WAFCustomRule` and `RateLimitRule` also need the zone-level **Zone WAF: Edit** permission
   - `IPList` also needs the account-level **Account Rule Lists: Edit** permission
   - Setting `Zone` `spec.plan` also needs **Billing: Edit**, and changes your bill
