@@ -14,6 +14,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"golang.org/x/tools/go/packages"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden files in testdata")
@@ -23,6 +25,9 @@ var boilerplate = filepath.Join("..", "hack", "boilerplate.go.txt")
 
 // committedSpec is the OpenAPI subset make codegen reads.
 var committedSpec = filepath.Join("openapi", "openapi.json")
+
+// testHeader is the license header of the golden files.
+const testHeader = "// Test header."
 
 // loadTestSpec loads the committed OpenAPI subset.
 func loadTestSpec(t *testing.T) *apiSpec {
@@ -34,20 +39,69 @@ func loadTestSpec(t *testing.T) *apiSpec {
 	return spec
 }
 
-// TestGolden generates the kinds of testdata/generator.yaml, each from a real
-// cloudflare-go v7 service, and compares them with their golden files.
+// refusedControllers are the test kinds whose controllers kflare-gen refuses,
+// with what it says: the shared CRUD reconciler cannot drive their services
+// yet.
+var refusedControllers = map[string]string{
+	"TestList": "New returns *rules.ListNewResponse and Get *rules.ListGetResponse: " +
+		"the shared CRUD reconciler needs one object type yet",
+	"TestIPList": "New returns *rules.ListNewResponse and Get *rules.ListGetResponse: " +
+		"the shared CRUD reconciler needs one object type yet",
+	"TestR2Bucket": "the service's List returns *r2.BucketListResponse: the shared CRUD reconciler can only page " +
+		"through a pagination.V4PagePaginationArray of Get's object yet",
+}
+
+// goldenFiles generates the kinds of testdata/generator.yaml, each from a
+// real cloudflare-go v7 service, by golden file name: a kind's types, and the
+// controller, envtest table and sample of a kind whose controller kflare-gen
+// does not refuse. It checks that it refuses the others, and why.
+func goldenFiles(t *testing.T) map[string][]byte {
+	t.Helper()
+	cfg, err := loadConfig(filepath.Join("testdata", "generator.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := loadTestSpec(t)
+	files := map[string][]byte{}
+	for _, entry := range cfg.Kinds {
+		svc := loadTestService(t, entry.Service)
+		k, err := buildKind(entry, svc, spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := buildController(k, entry, svc, spec)
+		if want, refused := refusedControllers[entry.Kind]; refused {
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("%s's controller: err = %v, want one containing %q", entry.Kind, err, want)
+			}
+			src, err := emitTypes(k, testHeader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			files[filepath.Base(typesFile(strings.ToLower(entry.Kind)))] = src
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := &outputs{files: map[string][]byte{}}
+		if err := out.addKind(c, testHeader); err != nil {
+			t.Fatal(err)
+		}
+		for path, src := range out.files {
+			files[filepath.Base(path)] = src
+		}
+	}
+	return files
+}
+
+// TestGolden compares what kflare-gen generates for the test kinds with their
+// golden files.
 func TestGolden(t *testing.T) {
-	config := filepath.Join("testdata", "generator.yaml")
-	cfg, err := loadConfig(config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	files, err := generate(cfg, sdk{dir: "."}, loadTestSpec(t), "// Test header.")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(files) != len(cfg.Kinds) {
-		t.Fatalf("generated %d files for %d kinds", len(files), len(cfg.Kinds))
+	files := goldenFiles(t)
+	if want := 4 + 3; len(files) != want {
+		t.Errorf("generated %d files, want %d: four types files, and the controller, specs and sample of one kind",
+			len(files), want)
 	}
 	for name, got := range files {
 		golden := filepath.Join("testdata", name+".golden")
@@ -68,10 +122,62 @@ func TestGolden(t *testing.T) {
 	}
 }
 
-// TestCommittedTypesAreUpToDate fails when the generated types in
-// api/v1alpha1 are not what kflare-gen generates from generator.yaml: make
-// codegen regenerates them.
-func TestCommittedTypesAreUpToDate(t *testing.T) {
+// TestGoldenControllerCompiles type-checks the golden controller and envtest
+// table of TestKVNamespace in internal/controller, as if they were generated
+// there, with its golden types in api/v1alpha1. controller-gen writes a kind's
+// deepcopy methods, so the test writes the two its types need.
+func TestGoldenControllerCompiles(t *testing.T) {
+	root, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func(name string) []byte {
+		src, err := os.ReadFile(filepath.Join("testdata", name+".golden"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return src
+	}
+	deepcopy := []byte(`package v1alpha1
+
+import "k8s.io/apimachinery/pkg/runtime"
+
+func (in *TestKVNamespace) DeepCopyObject() runtime.Object     { out := *in; return &out }
+func (in *TestKVNamespaceList) DeepCopyObject() runtime.Object { out := *in; return &out }
+`)
+	overlay := map[string][]byte{
+		filepath.Join(root, typesFile("testkvnamespace")):          read("zz_generated.testkvnamespace_types.go"),
+		filepath.Join(root, apiDir, "testkvnamespace_deepcopy.go"): deepcopy,
+		filepath.Join(root, controllerFile("testkvnamespace")):     read("zz_generated.testkvnamespace.go"),
+		filepath.Join(root, controllerTestFile("testkvnamespace")): read("zz_generated.testkvnamespace_test.go"),
+	}
+	pkgs, err := packages.Load(&packages.Config{
+		Mode:    packages.NeedName | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo,
+		Dir:     root,
+		Tests:   true,
+		Overlay: overlay,
+	}, "./"+controllerDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, pkg := range pkgs {
+		for _, e := range pkg.Errors {
+			t.Errorf("%s: %v", pkg.ID, e)
+		}
+		if pkg.Types != nil && pkg.Types.Scope().Lookup("fakeTestKVNamespaceAPI") != nil {
+			checked++
+		}
+	}
+	if checked == 0 {
+		t.Error("no package type-checked holds the golden envtest table")
+	}
+}
+
+// TestCommittedOutputIsUpToDate fails when what kflare-gen generates from
+// generator.yaml is not what the repository holds: make codegen regenerates
+// it.
+func TestCommittedOutputIsUpToDate(t *testing.T) {
 	cfg, err := loadConfig("generator.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -80,57 +186,143 @@ func TestCommittedTypesAreUpToDate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	files, err := generate(cfg, sdk{dir: "."}, loadTestSpec(t), string(header))
+	out, err := generate(cfg, sdk{dir: "."}, loadTestSpec(t), string(header))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, want := range files {
-		got, err := os.ReadFile(filepath.Join("..", "api", "v1alpha1", name))
+	for path, want := range out.files {
+		got, err := os.ReadFile(filepath.Join("..", path))
 		if err != nil || !bytes.Equal(got, want) {
-			t.Errorf("api/v1alpha1/%s is not what kflare-gen generates (%v): run make codegen", name, err)
+			t.Errorf("%s is not what kflare-gen generates (%v): run make codegen", path, err)
+		}
+	}
+	for path, lines := range out.blocks {
+		src, err := os.ReadFile(filepath.Join("..", path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated, err := replaceBlock(src, lines); err != nil || !bytes.Equal(updated, src) {
+			t.Errorf("%s's generated block is not what kflare-gen generates (%v): run make codegen", path, err)
 		}
 	}
 }
 
-func TestRun(t *testing.T) {
-	dir := t.TempDir()
-	for _, name := range []string{typesFile("gone"), "zz_generated.deepcopy.go", "kept_types.go"} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("package v1alpha1\n"), 0o600); err != nil {
+// runConfig is a configuration whose kind kflare-gen generates in full.
+const runConfig = `kinds:
+  - kind: TestKVNamespace
+    service: kv.NamespaceService
+    scope: account
+    shortName: testkv
+    noun: KV namespace
+    doc: TestKVNamespace is a KV namespace.
+    id: {field: id, status: namespaceID}
+    claimLabel: kflare.dev/test-kv-namespace-id
+    adopt: {by: title}
+    sample: {title: example}
+    ignore: {jurisdiction: not tested}
+`
+
+// testRepository returns a repository for run to write to, holding what it
+// edits: the files with blocks.
+func testRepository(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	for _, dir := range []string{apiDir, controllerDir, samplesDir, filepath.Dir(crdKustomization),
+		filepath.Dir(helmRBAC)} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := run(filepath.Join("testdata", "generator.yaml"), committedSpec, dir, boilerplate); err != nil {
+	block := "before\n  # " + blockBegin + "\n  - stale\n  # " + blockEnd + "\nafter\n"
+	for _, path := range []string{crdKustomization, helmRBAC} {
+		if err := os.WriteFile(filepath.Join(root, path), []byte(block), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+func TestRun(t *testing.T) {
+	root := testRepository(t)
+	write := func(path, content string) {
+		if err := os.WriteFile(filepath.Join(root, path), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// What kflare-gen generated for a kind no longer listed goes; the rest
+	// stays.
+	write(typesFile("gone"), "package v1alpha1\n\n"+generatedMarker+"\n")
+	write(controllerFile("gone"), "package controller\n\n"+generatedMarker+"\n")
+	write(controllerTestFile("gone"), "package controller\n\n"+generatedMarker+"\n")
+	write(sampleFile("gone"), generatedSample+" from generator/generator.yaml. DO NOT EDIT.\n")
+	write(sampleFile("handwritten"), "kind: HandWritten\n")
+	write(apiDir+"/zz_generated.deepcopy.go", "package v1alpha1\n")
+	write(controllerDir+"/zz_generated.handwritten.go", "package controller\n")
+
+	if err := run(writeConfig(t, runConfig), committedSpec, root, boilerplate); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	entries, err := os.ReadDir(dir)
+	var paths []string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		paths = append(paths, filepath.ToSlash(rel))
+		return err
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		names = append(names, e.Name())
+	want := []string{
+		apiDir + "/zz_generated.deepcopy.go", typesFile("testkvnamespace"),
+		sampleFile("handwritten"), sampleFile("testkvnamespace"), crdKustomization,
+		controllerDir + "/zz_generated.handwritten.go", controllerFile("testkvnamespace"),
+		controllerTestFile("testkvnamespace"), kindsFile, helmRBAC,
 	}
-	if want := []string{
-		"kept_types.go", "zz_generated.deepcopy.go", "zz_generated.testiplist_types.go",
-		"zz_generated.testkvnamespace_types.go", "zz_generated.testlist_types.go", "zz_generated.testr2bucket_types.go",
-	}; !slices.Equal(names, want) {
-		t.Errorf("after run: %q, want %q: the stale generated file removed, the others kept", names, want)
+	slices.Sort(want)
+	if !slices.Equal(paths, want) {
+		t.Errorf("after run: %q, want %q: the stale generated files removed, the others kept", paths, want)
 	}
-	src, err := os.ReadFile(filepath.Join(dir, "zz_generated.testlist_types.go"))
-	if err != nil || !strings.HasPrefix(string(src), "/*\nCopyright") || !strings.Contains(string(src), generatedMarker) {
-		t.Errorf("a generated file starts with the license header and carries the generated marker: %v", err)
+	for _, path := range []string{typesFile("testkvnamespace"), controllerFile("testkvnamespace"), kindsFile} {
+		src, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil || !strings.HasPrefix(string(src), "/*\nCopyright") || !strings.Contains(string(src), generatedMarker) {
+			t.Errorf("%s starts with the license header and carries the generated marker: %v", path, err)
+		}
+	}
+	for path, item := range map[string]string{
+		crdKustomization: "  - bases/kflare.dev_testkvnamespaces.yaml\n", helmRBAC: "  - testkvnamespaces\n",
+	} {
+		src, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := "before\n  # " + blockBegin + "\n" + item + "  # " + blockEnd + "\nafter\n"; string(src) != want {
+			t.Errorf("%s = %q, want %q", path, src, want)
+		}
 	}
 }
 
 func TestRunRefuses(t *testing.T) {
-	config := filepath.Join("testdata", "generator.yaml")
-	unknown := writeConfig(t, strings.Replace(validConfig, "kv.NamespaceService", "kv.NoSuchService", 1))
+	config := writeConfig(t, runConfig)
+	unknown := writeConfig(t, strings.Replace(runConfig, "kv.NamespaceService", "kv.NoSuchService", 1))
+	refused := writeConfig(t, strings.Replace(runConfig, "{by: title}", "{by: jurisdiction}", 1))
+	noBlock, noFile := testRepository(t), testRepository(t)
+	if err := os.WriteFile(filepath.Join(noBlock, helmRBAC), []byte("no block\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(noFile, crdKustomization)); err != nil {
+		t.Fatal(err)
+	}
 	for name, args := range map[string][4]string{
-		"a missing configuration": {"missing.yaml", committedSpec, t.TempDir(), boilerplate},
-		"a missing spec":          {config, "missing.json", t.TempDir(), boilerplate},
-		"a missing header":        {config, committedSpec, t.TempDir(), "missing.txt"},
-		"an unknown service":      {unknown, committedSpec, t.TempDir(), boilerplate},
-		"a missing API directory": {config, committedSpec, filepath.Join(t.TempDir(), "missing"), boilerplate},
+		"a missing configuration":    {"missing.yaml", committedSpec, testRepository(t), boilerplate},
+		"a missing spec":             {config, "missing.json", testRepository(t), boilerplate},
+		"a missing header":           {config, committedSpec, testRepository(t), "missing.txt"},
+		"an unknown service":         {unknown, committedSpec, testRepository(t), boilerplate},
+		"a controller it refuses":    {refused, committedSpec, testRepository(t), boilerplate},
+		"a missing repository":       {config, committedSpec, filepath.Join(t.TempDir(), "missing"), boilerplate},
+		"a file without its block":   {config, committedSpec, noBlock, boilerplate},
+		"a missing file with blocks": {config, committedSpec, noFile, boilerplate},
 	} {
 		if err := run(args[0], args[1], args[2], args[3]); err == nil {
 			t.Errorf("run with %s: err = nil", name)

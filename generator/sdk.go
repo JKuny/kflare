@@ -43,14 +43,33 @@ const (
 type service struct {
 	// name is the service as an entry names it, such as kv.NamespaceService.
 	name string
+	// pkg is the service's package, and typeName the service type's name.
+	pkg      *types.Package
+	typeName string
 	// create holds the fields of New's params, update those of Update's (or
 	// Edit's), and object those of what Get returns. update is nil for a
 	// service that cannot change an object.
 	create, update, object []sdkField
-	// newRoute, getRoute and updateRoute are the routes of those calls, which
-	// find their operations in the OpenAPI spec. updateRoute is empty when
-	// update is nil.
-	newRoute, getRoute, updateRoute route
+	// newRoute, getRoute, updateRoute and listRoute are the routes of New,
+	// Get, Update (or Edit) and List, which find their operations in the
+	// OpenAPI spec. updateRoute is empty when update is nil, and listRoute
+	// when the service cannot list.
+	newRoute, getRoute, updateRoute, listRoute route
+	// calls holds the service's methods that a controller calls, by name:
+	// New, Get, List, Delete, and Update or Edit, which updateMethod names. A
+	// method the service does not have is missing.
+	calls        map[string]*sdkCall
+	updateMethod string
+}
+
+// sdkCall is one method of a service, shaped (ctx, [id,] params, opts...)
+// (*result, error).
+type sdkCall struct {
+	name string
+	sig  *types.Signature
+	// params is the type of its params, and paramFields their fields.
+	params      types.Type
+	paramFields []sdkField
 }
 
 // route is the HTTP verb and path of an SDK call, as its package's api.md
@@ -128,31 +147,53 @@ func (s sdk) service(name string) (*service, error) {
 
 	r := newSDKReader(pkg)
 	methods := types.NewMethodSet(types.NewPointer(typ.Type()))
-	svc := &service{name: name}
-	if svc.create, _, err = r.call(methods, "New"); err != nil {
+	svc := &service{name: name, pkg: pkg.Types, typeName: typeName, calls: map[string]*sdkCall{}}
+	newCall, _, err := r.call(methods, "New")
+	if err != nil {
 		return nil, err
 	}
+	svc.calls["New"], svc.create = newCall, newCall.paramFields
 	if svc.newRoute, err = routeOf("New"); err != nil {
 		return nil, err
 	}
-	if _, svc.object, err = r.call(methods, "Get"); err != nil {
+	getCall, object, err := r.call(methods, "Get")
+	if err != nil {
 		return nil, err
 	}
+	svc.calls["Get"], svc.object = getCall, object
 	if svc.getRoute, err = routeOf("Get"); err != nil {
 		return nil, err
 	}
 	for _, method := range []string{"Update", "Edit"} {
-		svc.update, _, err = r.call(methods, method)
+		c, _, err := r.call(methods, method)
 		if errors.Is(err, errNoMethod) {
 			continue
 		}
 		if err != nil {
 			return nil, err
 		}
+		svc.calls[method], svc.update, svc.updateMethod = c, c.paramFields, method
 		if svc.updateRoute, err = routeOf(method); err != nil {
 			return nil, err
 		}
 		break
+	}
+	// What List returns is a page of objects, and what Delete returns goes
+	// unread: only their params are read.
+	for _, method := range []string{"List", "Delete"} {
+		c, err := r.method(methods, method)
+		if errors.Is(err, errNoMethod) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		svc.calls[method] = c
+	}
+	if svc.calls["List"] != nil {
+		if svc.listRoute, err = routeOf("List"); err != nil {
+			return nil, err
+		}
 	}
 	return svc, nil
 }
@@ -218,24 +259,36 @@ func newSDKReader(pkg *packages.Package) *sdkReader {
 	return r
 }
 
-// call reads a service method shaped (ctx, [id,] params, opts...) (*result,
-// error): it returns the fields of its params and of its result.
-func (r *sdkReader) call(methods *types.MethodSet, name string) (params, result []sdkField, err error) {
+// method reads a service method shaped (ctx, [id,] params, opts...)
+// (*result, error): its signature and its params.
+func (r *sdkReader) method(methods *types.MethodSet, name string) (*sdkCall, error) {
 	sel := methods.Lookup(r.pkg.Types, name)
 	if sel == nil {
-		return nil, nil, fmt.Errorf("%s: %w", name, errNoMethod)
+		return nil, fmt.Errorf("%s: %w", name, errNoMethod)
 	}
 	sig := sel.Type().(*types.Signature)
 	if !sig.Variadic() || sig.Params().Len() < 3 || sig.Results().Len() != 2 {
-		return nil, nil, fmt.Errorf("%s is not shaped (ctx, [id,] params, opts...) (*result, error)", name)
+		return nil, fmt.Errorf("%s is not shaped (ctx, [id,] params, opts...) (*result, error)", name)
 	}
-	if params, err = r.fields(sig.Params().At(sig.Params().Len()-2).Type(), true); err != nil {
-		return nil, nil, fmt.Errorf("%s's params: %w", name, err)
+	c := &sdkCall{name: name, sig: sig, params: sig.Params().At(sig.Params().Len() - 2).Type()}
+	var err error
+	if c.paramFields, err = r.fields(c.params, true); err != nil {
+		return nil, fmt.Errorf("%s's params: %w", name, err)
 	}
-	if result, err = r.fields(sig.Results().At(0).Type(), false); err != nil {
+	return c, nil
+}
+
+// call reads a method as method does, and the fields of its result.
+func (r *sdkReader) call(methods *types.MethodSet, name string) (*sdkCall, []sdkField, error) {
+	c, err := r.method(methods, name)
+	if err != nil {
+		return nil, nil, err
+	}
+	result, err := r.fields(c.sig.Results().At(0).Type(), false)
+	if err != nil {
 		return nil, nil, fmt.Errorf("%s's result: %w", name, err)
 	}
-	return params, result, nil
+	return c, result, nil
 }
 
 // fields reads the fields of a struct type declared in the package, or of a

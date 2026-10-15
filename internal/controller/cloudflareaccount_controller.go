@@ -108,18 +108,14 @@ func (r *CloudflareAccountReconciler) Reconcile(ctx context.Context, req ctrl.Re
 // it re-triggers the account, so it is released as soon as the last one is
 // gone.
 func (r *CloudflareAccountReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	dependentDeleted := builder.WithPredicates(deletesOnly)
-	dependent := handler.EnqueueRequestsFromMapFunc(r.deletingAccountOf)
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&cloudflarev1alpha1.CloudflareAccount{}).
-		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.accountsForSecret)).
-		Watches(&cloudflarev1alpha1.Zone{}, dependent, dependentDeleted).
-		Watches(&cloudflarev1alpha1.Tunnel{}, dependent, dependentDeleted).
-		Watches(&cloudflarev1alpha1.WorkerScript{}, dependent, dependentDeleted).
-		Watches(&cloudflarev1alpha1.KVNamespace{}, dependent, dependentDeleted).
-		Watches(&cloudflarev1alpha1.R2Bucket{}, dependent, dependentDeleted).
-		Watches(&cloudflarev1alpha1.IPList{}, dependent, dependentDeleted).
-		Complete(r)
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.accountsForSecret))
+	for _, dependent := range accountDependents {
+		b = b.Watches(dependent.newObject(), handler.EnqueueRequestsFromMapFunc(r.deletingAccountOf),
+			builder.WithPredicates(deletesOnly))
+	}
+	return b.Complete(r)
 }
 
 // accountsForSecret maps a Secret event to reconcile.Requests for every

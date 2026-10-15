@@ -9,12 +9,14 @@ resources:
 - bases/kflare.dev_tunnelconfigurations.yaml
 - bases/kflare.dev_workerscripts.yaml
 - bases/kflare.dev_workerroutes.yaml
-- bases/kflare.dev_kvnamespaces.yaml
 - bases/kflare.dev_r2buckets.yaml
 - bases/kflare.dev_wafcustomrules.yaml
 - bases/kflare.dev_ratelimitrules.yaml
 - bases/kflare.dev_iplists.yaml
 - bases/kflare.dev_managedrulesets.yaml
+# +kflare-gen:begin The CRDs of the kinds in generator/generator.yaml: make codegen keeps this block.
+- bases/kflare.dev_kvnamespaces.yaml
+# +kflare-gen:end
 #+kubebuilder:scaffold:crdkustomizeresource
 
 #patches:

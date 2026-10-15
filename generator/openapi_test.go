@@ -212,3 +212,35 @@ func TestPropertiesRefusesWhatItCannotResolve(t *testing.T) {
 		t.Error("resultProperties of a dangling envelope: err = nil")
 	}
 }
+
+func TestPageSize(t *testing.T) {
+	list := route{verb: "get", path: "/accounts/{account_id}/things"}
+	if got, err := loadTestSpec(t).pageSize(route{verb: "get", path: "/accounts/{id}/storage/kv/namespaces"}); err != nil ||
+		got != 1000 {
+		t.Errorf("the KV namespaces' page size = %d, %v, want 1000", got, err)
+	}
+	spec := parseTestSpec(t, `{"paths": {"/accounts/{account_id}/things": {"get": {"parameters": [
+		{"name": "page", "in": "query", "schema": {"type": "number", "maximum": 5}},
+		{"$ref": "#/components/parameters/per_page"}]}}},
+		"components": {"parameters": {"per_page": {"name": "per_page", "in": "query",
+			"schema": {"type": "number", "maximum": 50}}}}}`)
+	if got, err := spec.pageSize(list); err != nil || got != 50 {
+		t.Errorf("a per_page through a $ref: page size = %d, %v, want 50", got, err)
+	}
+	for name, tc := range map[string]struct{ params, want string }{
+		"no per_page":           {`[{"name": "per_page", "in": "header"}]`, "takes no per_page query parameter"},
+		"no maximum":            {`[{"name": "per_page", "in": "query", "schema": {"type": "number"}}]`, "no maximum"},
+		"a fraction":            {`[{"name": "per_page", "in": "query", "schema": {"maximum": 2.5}}]`, "no maximum"},
+		"an exclusive maximum":  {`[{"name": "per_page", "in": "query", "schema": {"maximum": 5, "exclusiveMaximum": true}}]`, "no maximum"},
+		"a dangling $ref":       {`[{"$ref": "#/components/parameters/missing"}]`, "not in the OpenAPI subset"},
+		"a schema that dangles": {`[{"name": "per_page", "in": "query", "schema": {"$ref": "#/components/schemas/x"}}]`, "per_page"},
+	} {
+		spec := parseTestSpec(t, `{"paths": {"/accounts/{account_id}/things": {"get": {"parameters": `+tc.params+`}}}}`)
+		if _, err := spec.pageSize(list); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want one containing %q", name, err, tc.want)
+		}
+	}
+	if _, err := spec.pageSize(route{verb: "get", path: "/elsewhere"}); err == nil {
+		t.Error("the page size of an operation the spec lacks: err = nil")
+	}
+}

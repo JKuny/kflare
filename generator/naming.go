@@ -63,3 +63,20 @@ func humanize(jsonName string) string {
 	}
 	return strings.Join(words, " ")
 }
+
+// plural returns a kind's resource name: the kind in lower case, made plural
+// as English makes a regular noun plural. KVNamespace is kvnamespaces,
+// AccessPolicy accesspolicies and AddressMap addressmaps. The types emitter
+// gives controller-gen the name, so that the CRD, the RBAC rules and the
+// files kflare-gen names agree.
+func plural(kind string) string {
+	lower := strings.ToLower(kind)
+	switch {
+	case strings.HasSuffix(lower, "y") && len(lower) > 1 && !strings.ContainsRune("aeiou", rune(lower[len(lower)-2])):
+		return strings.TrimSuffix(lower, "y") + "ies"
+	case strings.HasSuffix(lower, "s"), strings.HasSuffix(lower, "x"), strings.HasSuffix(lower, "z"),
+		strings.HasSuffix(lower, "ch"), strings.HasSuffix(lower, "sh"):
+		return lower + "es"
+	}
+	return lower + "s"
+}

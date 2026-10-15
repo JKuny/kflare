@@ -23,6 +23,8 @@ const validConfig = `kinds:
     doc: KVNamespace is a Workers KV namespace.
     id: {field: id, status: namespaceID}
     claimLabel: kflare.dev/kv-namespace-id
+    adopt: {by: title}
+    sample: {title: example}
 `
 
 func writeConfig(t *testing.T, content string) string {
@@ -46,6 +48,11 @@ func TestLoadConfig(t *testing.T) {
 	if _, err := loadConfig(filepath.Join(t.TempDir(), "missing.yaml")); err == nil {
 		t.Error("loadConfig of a missing file: err = nil")
 	}
+}
+
+// dependent returns a dependents key with one dependent.
+func dependent(kind, refs, reason string) string {
+	return "    dependents:\n      - kind: " + kind + "\n        refs: " + refs + "\n        reason: " + reason + "\n"
 }
 
 func TestLoadConfigRefuses(t *testing.T) {
@@ -91,6 +98,15 @@ func TestLoadConfigRefuses(t *testing.T) {
 			"both ignored and fixed"},
 		{"a field both fixed and adjusted", validConfig + "    fixed:\n      kind: ip\n    fields:\n      kind: {}\n",
 			"both fixed and adjusted"},
+		{"no adoption key", replace("adopt: {by: title}", "adopt: {}"), "adopt.by is empty"},
+		{"no sample", replace("sample: {title: example}", "sample: {}"), "sample is empty"},
+		{"a dependent that is not a Go name", validConfig + dependent("worker-script", "bound", "why"),
+			"not a Go type name"},
+		{"a dependent listed twice", validConfig + dependent("WorkerScript", "bound", "why") +
+			strings.TrimPrefix(dependent("WorkerScript", "bound", "why"), "    dependents:\n"), "listed twice"},
+		{"a dependent's refs that is exported", validConfig + dependent("WorkerScript", "Bound", "why"),
+			"not an unexported Go name"},
+		{"a dependent without a reason", validConfig + dependent("WorkerScript", "bound", `" "`), "gives no reason"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -88,7 +88,21 @@ metadata:
     rbac.authorization.k8s.io/aggregate-to-admin: "true"
 rules:
   - apiGroups: ["kflare.dev"]
-    resources: ["zones", "dnsrecords", "tunnels", "tunnelconfigurations", "workerscripts", "workerroutes", "kvnamespaces", "r2buckets", "wafcustomrules", "ratelimitrules", "iplists", "managedrulesets"]
+    resources:
+      - zones
+      - dnsrecords
+      - tunnels
+      - tunnelconfigurations
+      - workerscripts
+      - workerroutes
+      - r2buckets
+      - wafcustomrules
+      - ratelimitrules
+      - iplists
+      - managedrulesets
+      # +kflare-gen:begin The kinds in generator/generator.yaml: make codegen keeps this block.
+      - kvnamespaces
+      # +kflare-gen:end
     verbs: ["create", "update", "patch", "delete", "deletecollection"]
 {{- end }}
 {{- end }}

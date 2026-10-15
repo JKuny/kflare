@@ -61,7 +61,7 @@ func emitTypes(k *kind, header string) ([]byte, error) {
 	write("\tCloudflareMetadata %sCloudflareMetadata `json:\"cloudflareMetadata,omitempty\"`\n}\n\n", k.name)
 
 	write("// +kubebuilder:object:root=true\n// +kubebuilder:subresource:status\n")
-	write("// +kubebuilder:resource:scope=Namespaced,shortName=%s\n", k.shortName)
+	write("// +kubebuilder:resource:path=%s,scope=Namespaced,shortName=%s\n", k.plural, k.shortName)
 	for _, c := range k.printColumns {
 		write("// +kubebuilder:printcolumn:name=%q,type=%s,JSONPath=`%s`\n", c.name, c.typ, c.jsonPath)
 	}
@@ -124,7 +124,18 @@ func comment(b *strings.Builder, indent string, lines []string) {
 // wrap breaks text into lines of at most commentWidth characters once
 // commented, breaking between words.
 func wrap(text string) []string {
-	const width = commentWidth - len("// ")
+	return wrapAt(text, commentWidth-len("// "))
+}
+
+// wrapIndented wraps text for a comment one tab in, a tab counting as four
+// characters.
+func wrapIndented(text string) []string {
+	return wrapAt(text, commentWidth-len("    // "))
+}
+
+// wrapAt breaks text into lines of at most width characters, breaking
+// between words.
+func wrapAt(text string, width int) []string {
 	var out []string
 	line := ""
 	for _, word := range strings.Fields(text) {

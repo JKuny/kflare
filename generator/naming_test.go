@@ -47,3 +47,21 @@ func TestHumanize(t *testing.T) {
 		}
 	}
 }
+
+func TestPlural(t *testing.T) {
+	for kind, want := range map[string]string{
+		"KVNamespace":  "kvnamespaces",
+		"AccessPolicy": "accesspolicies",
+		"Gateway":      "gateways",
+		"Address":      "addresses",
+		"Box":          "boxes",
+		"Buzz":         "buzzes",
+		"Branch":       "branches",
+		"Mesh":         "meshes",
+		"Y":            "ys",
+	} {
+		if got := plural(kind); got != want {
+			t.Errorf("plural(%q) = %q, want %q", kind, got, want)
+		}
+	}
+}

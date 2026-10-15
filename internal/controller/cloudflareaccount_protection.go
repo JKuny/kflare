@@ -66,8 +66,8 @@ func (r *CloudflareAccountReconciler) reconcileDelete(
 	return ctrl.Result{}, err
 }
 
-// deletingAccountOf maps the deletion of a Zone, Tunnel or WorkerScript to
-// its account while that account is being deleted.
+// deletingAccountOf maps the deletion of a resource that uses an account
+// (accountDependents) to that account while it is being deleted.
 func (r *CloudflareAccountReconciler) deletingAccountOf(ctx context.Context, obj client.Object) []reconcile.Request {
 	return deletingParentOf(ctx, r.Client, obj,
 		func() client.Object { return &cloudflarev1alpha1.CloudflareAccount{} }, false, accountDependents)

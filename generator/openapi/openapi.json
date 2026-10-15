@@ -28,6 +28,26 @@
         "type": "string",
         "x-auditable": true
       },
+      "lists_api-response-collection": {
+        "allOf": [
+          {
+            "properties": {
+              "result": {
+                "items": {
+                  "type": "object"
+                },
+                "nullable": true,
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/lists_api-response-common"
+          }
+        ],
+        "type": "object"
+      },
       "lists_api-response-common": {
         "properties": {
           "errors": {
@@ -201,6 +221,25 @@
         "type": "string",
         "x-auditable": true
       },
+      "lists_lists-response-collection": {
+        "allOf": [
+          {
+            "properties": {
+              "result": {
+                "items": {
+                  "$ref": "#/components/schemas/lists_list"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/lists_api-response-collection"
+          }
+        ],
+        "type": "object"
+      },
       "lists_messages": {
         "example": [],
         "items": {
@@ -342,6 +381,21 @@
         },
         "type": "array"
       },
+      "r2_result_info": {
+        "properties": {
+          "cursor": {
+            "description": "A continuation token that should be used to fetch the next page of results.",
+            "example": "1-JTdCJTIydiUyMiUzQTElMkMlMjJzdGFydEFmdGVyJTIyJTNBJTIyZGF2aWRwdWJsaWMlMjIlN0Q=",
+            "type": "string"
+          },
+          "per_page": {
+            "description": "Maximum number of results on this page.",
+            "example": 20,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
       "r2_storage_class": {
         "default": "Standard",
         "description": "Storage class for newly uploaded objects, unless specified otherwise.",
@@ -408,6 +462,37 @@
           "errors",
           "messages",
           "result"
+        ],
+        "type": "object"
+      },
+      "r2_v4_response_list": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/r2_v4_response"
+          },
+          {
+            "properties": {
+              "result_info": {
+                "$ref": "#/components/schemas/r2_result_info"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "workers-kv_api-response-collection": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/workers-kv_api-response-common"
+          },
+          {
+            "properties": {
+              "result_info": {
+                "$ref": "#/components/schemas/workers-kv_result_info"
+              }
+            },
+            "type": "object"
+          }
         ],
         "type": "object"
       },
@@ -585,6 +670,31 @@
         "maxLength": 512,
         "type": "string",
         "x-auditable": true
+      },
+      "workers-kv_result_info": {
+        "properties": {
+          "count": {
+            "description": "Total number of results for the requested service.",
+            "example": 1,
+            "type": "number"
+          },
+          "page": {
+            "description": "Current page within paginated list of results.",
+            "example": 1,
+            "type": "number"
+          },
+          "per_page": {
+            "description": "Number of results per page of results.",
+            "example": 20,
+            "type": "number"
+          },
+          "total_count": {
+            "description": "Total results available without any search parameters.",
+            "example": 2000,
+            "type": "number"
+          }
+        },
+        "type": "object"
       }
     }
   },
@@ -596,6 +706,142 @@
   "openapi": "3.0.3",
   "paths": {
     "/accounts/{account_id}/r2/buckets": {
+      "get": {
+        "description": "Lists a page of R2 buckets in the account and selected jurisdiction. Use the returned cursor to retrieve the next page.",
+        "operationId": "r2-list-buckets",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/r2_account_identifier"
+            }
+          },
+          {
+            "in": "query",
+            "name": "name_contains",
+            "schema": {
+              "description": "Bucket names to filter by. Only buckets with this phrase in their name will be returned.",
+              "example": "my-bucket",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "start_after",
+            "schema": {
+              "description": "Bucket name to start searching after. Buckets are ordered lexicographically.",
+              "example": "my-bucket",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "per_page",
+            "schema": {
+              "default": 20,
+              "description": "Maximum number of buckets to return in a single call.",
+              "maximum": 1000,
+              "minimum": 1,
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "order",
+            "schema": {
+              "description": "Field to order buckets by.",
+              "enum": [
+                "name"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "direction",
+            "schema": {
+              "description": "Direction to order buckets.",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "example": "desc",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "description": "Pagination cursor received during the last List Buckets call. R2 buckets are paginated using cursors instead of page numbers.",
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/r2_cf-r2-jurisdiction"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/r2_v4_response_list"
+                    },
+                    {
+                      "properties": {
+                        "result": {
+                          "properties": {
+                            "buckets": {
+                              "items": {
+                                "$ref": "#/components/schemas/r2_bucket"
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "type": "object"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "List Buckets response."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/r2_v4_response_failure"
+                }
+              }
+            },
+            "description": "List Buckets response failure."
+          }
+        },
+        "security": [
+          {
+            "api_token": []
+          }
+        ],
+        "summary": "List Buckets",
+        "tags": [
+          "R2 Bucket"
+        ],
+        "x-api-token-group": [
+          "Workers R2 Storage Write",
+          "Workers R2 Storage Read"
+        ],
+        "x-fern-availability": "generally-available",
+        "x-fern-sdk-group-name": "r2.buckets",
+        "x-fern-sdk-method-name": "list"
+      },
       "post": {
         "description": "Creates an R2 bucket in the account and selected jurisdiction, with an optional location hint and default storage class.",
         "operationId": "r2-create-bucket",
@@ -856,6 +1102,73 @@
       }
     },
     "/accounts/{account_id}/rules/lists": {
+      "get": {
+        "description": "Fetches all lists in the account.",
+        "operationId": "lists-get-lists",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/lists_account_id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/lists_lists-response-collection"
+                }
+              }
+            },
+            "description": "Get lists response."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/lists_lists-response-collection"
+                    },
+                    {
+                      "$ref": "#/components/schemas/lists_api-response-common-failure"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Get lists response failure."
+          }
+        },
+        "security": [
+          {
+            "api_email": [],
+            "api_key": [],
+            "api_token": []
+          }
+        ],
+        "summary": "Get lists",
+        "tags": [
+          "Lists"
+        ],
+        "x-api-token-group": [
+          "Account Filter Lists Read",
+          "Account Filter Lists Edit"
+        ],
+        "x-cfPlanAvailability": {
+          "business": true,
+          "enterprise": true,
+          "free": true,
+          "pro": true
+        },
+        "x-fern-availability": "generally-available",
+        "x-fern-sdk-group-name": "rules.lists",
+        "x-fern-sdk-method-name": "list"
+      },
       "post": {
         "description": "Creates a new list of the specified kind.",
         "operationId": "lists-create-a-list",
@@ -1114,6 +1427,124 @@
       }
     },
     "/accounts/{account_id}/storage/kv/namespaces": {
+      "get": {
+        "description": "Lists Workers KV namespaces owned by the specified account. Use `page` and `per_page` to select a page of results, and `order` and `direction` to control sorting.",
+        "operationId": "workers-kv-namespace-list-namespaces",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/workers-kv_identifier"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "default": 1,
+              "description": "Page number of paginated results.",
+              "minimum": 1,
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "per_page",
+            "schema": {
+              "default": 20,
+              "description": "Maximum number of results per page.",
+              "maximum": 1000,
+              "minimum": 1,
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "order",
+            "schema": {
+              "description": "Namespace field to sort by (`id` or `title`).",
+              "enum": [
+                "id",
+                "title"
+              ],
+              "example": "id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "direction",
+            "schema": {
+              "description": "Sort namespaces in ascending (`asc`) or descending (`desc`) order.",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "example": "asc",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/workers-kv_api-response-collection"
+                    },
+                    {
+                      "properties": {
+                        "result": {
+                          "items": {
+                            "$ref": "#/components/schemas/workers-kv_namespace"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "List Namespaces response."
+          },
+          "4XX": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/workers-kv_api-response-common-failure"
+                }
+              }
+            },
+            "description": "List Namespaces response failure."
+          }
+        },
+        "security": [
+          {
+            "api_token": []
+          },
+          {
+            "api_email": [],
+            "api_key": []
+          }
+        ],
+        "summary": "List namespaces",
+        "tags": [
+          "Workers KV Namespace"
+        ],
+        "x-api-token-group": [
+          "Workers KV Storage Write",
+          "Workers KV Storage Read"
+        ],
+        "x-fern-availability": "generally-available",
+        "x-fern-sdk-group-name": "kv.namespaces",
+        "x-fern-sdk-method-name": "list"
+      },
       "post": {
         "description": "Creates a Workers KV namespace in the specified account with the given title. Returns `400` if the account already owns a namespace with that title; an existing namespace must be explicitly deleted before it can be replaced. An optional jurisdiction restricts where data is durably stored and can only be set at creation time.",
         "operationId": "workers-kv-namespace-create-a-namespace",
