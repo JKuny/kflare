@@ -39,10 +39,11 @@ Create an API token in the Cloudflare dashboard (**My Profile → API Tokens**, 
 | `R2Bucket` | Account · Workers R2 Storage · Edit |
 | `D1Database` | Account · D1 · Edit |
 | `WAFCustomRule`, `RateLimitRule`, `ManagedRuleset` | Zone · Zone WAF · Edit |
+| `TransformRule` | Zone · Transform Rules · Edit |
 | `IPList` | Account · Account Rule Lists · Edit |
 
 These are enough on their own: in October 2026 a token holding only them (with Zone · Zone · Read, and without
-Billing) ran kflare's full live test suite against an existing zone, before `D1Database` was added. Scope zone
+Billing) ran kflare's full live test suite against an existing zone, before `TransformRule` was added. Scope zone
 permissions to the zones kflare should manage. Note the account ID, shown on the account's overview page.
 
 ## 2. Install the chart
@@ -135,6 +136,7 @@ Every other kind references the account (or a resource that does). Examples are 
 | `RateLimitRule` | Namespaced | `zoneRef` (same namespace) | [API rate limit](../config/samples/cloudflare_v1alpha1_ratelimitrule.yaml) |
 | `IPList` | Namespaced | `accountRef`; rule expressions use it as `$name` | [office addresses and a rule using them](../config/samples/cloudflare_v1alpha1_iplist.yaml) |
 | `ManagedRuleset` | Namespaced | `zoneRef` (same namespace) | [Free Managed Ruleset with overrides](../config/samples/cloudflare_v1alpha1_managedruleset.yaml) |
+| `TransformRule` | Namespaced | `zoneRef` (same namespace) | [URL rewrite, request and response headers](../config/samples/cloudflare_v1alpha1_transformrule.yaml) |
 
 Things to know before pointing kflare at existing infrastructure:
 
@@ -170,6 +172,11 @@ Things to know before pointing kflare at existing infrastructure:
   ManagedRuleset in a zone hands it back to Cloudflare's default, which turns the Free Managed Ruleset on again even
   if it was off before kflare. A zone deploys each ruleset once: a second deployment, or one a rule created outside
   kflare already makes, reports `RulesetConflict`. Free zones can only deploy the Free Managed Ruleset.
+- **Transform rules.** Each `TransformRule` manages one rule in its zone, marked and ordered like WAF custom
+  rules. Its `spec.type`, which cannot change, picks what it transforms: `urlRewrite` rewrites the URL the origin
+  receives (`uri`), `requestHeaders` sets or removes headers of the request to the origin, and `responseHeaders`
+  adds, sets or removes headers of the response (`headers`). Free zones allow 10 transform rules across the three
+  types, without regular expressions (`regex_replace`).
 - **Immutable fields.** Names and references (`spec.name`, `accountRef`, `zoneRef`, DNS `type`, ...) cannot be
   changed. Create a new resource instead.
 
@@ -256,7 +263,7 @@ Order matters, because kflare's finalizers need the controller running to clean 
    R2Bucket `retain`.
 
    ```sh
-   kubectl delete zones.kflare.dev,dnsrecords.kflare.dev,workerroutes.kflare.dev,wafcustomrules.kflare.dev,ratelimitrules.kflare.dev,managedrulesets.kflare.dev,iplists.kflare.dev,tunnels.kflare.dev,tunnelconfigurations.kflare.dev,workerscripts.kflare.dev,kvnamespaces.kflare.dev,r2buckets.kflare.dev,d1databases.kflare.dev --all -A
+   kubectl delete zones.kflare.dev,dnsrecords.kflare.dev,workerroutes.kflare.dev,wafcustomrules.kflare.dev,ratelimitrules.kflare.dev,managedrulesets.kflare.dev,transformrules.kflare.dev,iplists.kflare.dev,tunnels.kflare.dev,tunnelconfigurations.kflare.dev,workerscripts.kflare.dev,kvnamespaces.kflare.dev,r2buckets.kflare.dev,d1databases.kflare.dev --all -A
    kubectl delete cloudflareaccounts.kflare.dev --all
    ```
 
