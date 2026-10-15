@@ -46,6 +46,15 @@ type kindConfig struct {
 	// ClaimLabel is the label holding the ID of the object a resource
 	// manages.
 	ClaimLabel string `json:"claimLabel"`
+	// Adopt says how a resource finds the existing object it adopts.
+	Adopt adoptConfig `json:"adopt"`
+	// Dependents are the kinds whose resources use a resource of this kind,
+	// which waits for them before it is deleted.
+	Dependents []dependentConfig `json:"dependents,omitempty"`
+	// Sample holds the values of the sample's spec fields, by API name. It
+	// sets every required field, and every immutable string field, which the
+	// generated specs change.
+	Sample map[string]any `json:"sample"`
 	// Fields adjusts fields, by their API name.
 	Fields map[string]fieldConfig `json:"fields,omitempty"`
 	// Fixed leaves out of the spec fields that kflare always sends with the
@@ -67,6 +76,27 @@ type idConfig struct {
 	// PrintColumn names the ID's column; by default, the status name in
 	// words ("Namespace ID").
 	PrintColumn string `json:"printColumn,omitempty"`
+}
+
+// adoptConfig says how a resource finds the existing object it adopts.
+type adoptConfig struct {
+	// By is the API name of the field a resource adopts an existing object
+	// by, such as title: one that no two objects in an account share. A
+	// resource that would adopt an object another one manages reports the
+	// field's Go name followed by Conflict, as in TitleConflict.
+	By string `json:"by"`
+}
+
+// dependentConfig is a kind whose resources use resources of another.
+type dependentConfig struct {
+	// Kind is the dependent kind, such as WorkerScript.
+	Kind string `json:"kind"`
+	// Refs names a hand-written function in internal/controller that returns
+	// the names of the resources a dependent uses, in its namespace, such as
+	// boundKVNamespaces.
+	Refs string `json:"refs"`
+	// Reason says why a resource waits for these dependents.
+	Reason string `json:"reason"`
 }
 
 // fieldConfig adjusts one field.
@@ -112,6 +142,8 @@ var (
 	kindName   = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`)
 	shortName  = regexp.MustCompile(`^[a-z][a-z0-9]*$`)
 	statusName = regexp.MustCompile(`^[a-z][A-Za-z0-9]*$`)
+	// funcName is an unexported Go name.
+	funcName = regexp.MustCompile(`^[a-z][A-Za-z0-9]*$`)
 )
 
 // loadConfig reads and checks the configuration at path. Unknown keys are
@@ -170,6 +202,24 @@ func (k *kindConfig) validate() error {
 		return fmt.Errorf("id.status %q is not a lowerCamel name", k.ID.Status)
 	case !strings.HasPrefix(k.ClaimLabel, "kflare.dev/"):
 		return fmt.Errorf("claimLabel %q does not start with kflare.dev/", k.ClaimLabel)
+	case k.Adopt.By == "":
+		return fmt.Errorf("adopt.by is empty")
+	case len(k.Sample) == 0:
+		return fmt.Errorf("sample is empty")
+	}
+	seenDependents := map[string]bool{}
+	for i, d := range k.Dependents {
+		switch {
+		case !kindName.MatchString(d.Kind):
+			return fmt.Errorf("dependents[%d]: kind %q is not a Go type name", i, d.Kind)
+		case seenDependents[d.Kind]:
+			return fmt.Errorf("dependents[%d]: %s is listed twice", i, d.Kind)
+		case !funcName.MatchString(d.Refs):
+			return fmt.Errorf("dependents[%d]: refs %q is not an unexported Go name", i, d.Refs)
+		case strings.TrimSpace(d.Reason) == "":
+			return fmt.Errorf("dependents[%d]: gives no reason", i)
+		}
+		seenDependents[d.Kind] = true
 	}
 	for name, reason := range k.Ignore {
 		if strings.TrimSpace(reason) == "" {

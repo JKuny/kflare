@@ -28,7 +28,8 @@ import (
 // reason InUse meanwhile:
 //
 //   - a CloudflareAccount waits for the Zones, Tunnels, WorkerScripts,
-//     KVNamespaces, R2Buckets and IPLists that use its credentials;
+//     R2Buckets and IPLists that use its credentials, and for the resources
+//     of every kind kflare-gen generates, such as KVNamespaces;
 //   - a Zone waits for its DNSRecords, WorkerRoutes and rules
 //     (WAFCustomRules, RateLimitRules, ManagedRulesets), which need its zone
 //     ID and account;
@@ -73,21 +74,20 @@ func dependents[T any, P interface {
 }
 
 var (
-	// accountDependents use a CloudflareAccount's credentials directly.
-	accountDependents = []dependentKind{
+	// accountDependents use a CloudflareAccount's credentials directly: the
+	// hand-written kinds listed here, and the generated ones.
+	accountDependents = append([]dependentKind{
 		dependents("Zone", func() client.ObjectList { return &cloudflarev1alpha1.ZoneList{} },
 			func(z *cloudflarev1alpha1.Zone) []string { return []string{z.Spec.AccountRef.Name} }),
 		dependents("Tunnel", func() client.ObjectList { return &cloudflarev1alpha1.TunnelList{} },
 			func(t *cloudflarev1alpha1.Tunnel) []string { return []string{t.Spec.AccountRef.Name} }),
 		dependents("WorkerScript", func() client.ObjectList { return &cloudflarev1alpha1.WorkerScriptList{} },
 			func(w *cloudflarev1alpha1.WorkerScript) []string { return []string{w.Spec.AccountRef.Name} }),
-		dependents("KVNamespace", func() client.ObjectList { return &cloudflarev1alpha1.KVNamespaceList{} },
-			func(kv *cloudflarev1alpha1.KVNamespace) []string { return []string{kv.Spec.AccountRef.Name} }),
 		dependents("R2Bucket", func() client.ObjectList { return &cloudflarev1alpha1.R2BucketList{} },
 			func(b *cloudflarev1alpha1.R2Bucket) []string { return []string{b.Spec.AccountRef.Name} }),
 		dependents("IPList", func() client.ObjectList { return &cloudflarev1alpha1.IPListList{} },
 			func(l *cloudflarev1alpha1.IPList) []string { return []string{l.Spec.AccountRef.Name} }),
-	}
+	}, generatedAccountDependents...)
 
 	// zoneDependents live in a Zone's namespace and reference it by name.
 	zoneDependents = []dependentKind{
@@ -101,13 +101,6 @@ var (
 			func(rl *cloudflarev1alpha1.RateLimitRule) []string { return []string{rl.Spec.ZoneRef.Name} }),
 		dependents("ManagedRuleset", func() client.ObjectList { return &cloudflarev1alpha1.ManagedRulesetList{} },
 			func(m *cloudflarev1alpha1.ManagedRuleset) []string { return []string{m.Spec.ZoneRef.Name} }),
-	}
-
-	// kvNamespaceDependents live in a KVNamespace's namespace and bind it
-	// through kvNamespaceRef.
-	kvNamespaceDependents = []dependentKind{
-		dependents("WorkerScript", func() client.ObjectList { return &cloudflarev1alpha1.WorkerScriptList{} },
-			boundKVNamespaces),
 	}
 
 	// r2BucketDependents live in an R2Bucket's namespace and bind it through

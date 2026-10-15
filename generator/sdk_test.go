@@ -149,9 +149,41 @@ func TestServiceReadsRoutes(t *testing.T) {
 			t.Errorf("%s's route = %s, want %s", name, got, want)
 		}
 	}
+	if got := kv.listRoute.String(); got != "get /accounts/{account_id}/storage/kv/namespaces" {
+		t.Errorf("List's route = %s", got)
+	}
 	r2 := loadTestService(t, "r2.BucketService")
 	if got := r2.updateRoute.String(); got != "patch /accounts/{account_id}/r2/buckets/{bucket_name}" {
 		t.Errorf("R2's Edit route = %s", got)
+	}
+}
+
+func TestServiceReadsTheCallsAControllerMakes(t *testing.T) {
+	kv := loadTestService(t, "kv.NamespaceService")
+	if kv.pkg.Path() != sdkModule+"/kv" || kv.typeName != "NamespaceService" || kv.updateMethod != "Update" {
+		t.Errorf("package %s, type %s, update %s", kv.pkg.Path(), kv.typeName, kv.updateMethod)
+	}
+	for name, params := range map[string]string{
+		"New": "kv.NamespaceNewParams", "Get": "kv.NamespaceGetParams", "List": "kv.NamespaceListParams",
+		"Update": "kv.NamespaceUpdateParams", "Delete": "kv.NamespaceDeleteParams",
+	} {
+		call := kv.calls[name]
+		if call == nil || call.name != name || typeName(call.params) != params {
+			t.Errorf("%s: %+v, want params %s", name, call, params)
+		}
+	}
+	if got := summary(kv.calls["List"].paramFields); !slices.Equal(got, []string{
+		"path account_id string required",
+		"query direction kv.NamespaceListParamsDirection enum=asc,desc",
+		"query order kv.NamespaceListParamsOrder enum=id,title",
+		"query page float64",
+		"query per_page float64",
+	}) {
+		t.Errorf("List's params = %q", got)
+	}
+	r2 := loadTestService(t, "r2.BucketService")
+	if r2.updateMethod != "Edit" || r2.calls["Edit"] == nil || r2.calls["Update"] != nil {
+		t.Errorf("R2's update is Edit: %s", r2.updateMethod)
 	}
 }
 

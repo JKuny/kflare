@@ -4,13 +4,14 @@ Copyright 2026 Jonathan Graniero.
 SPDX-License-Identifier: MIT
 */
 
-// Command kflare-gen generates the API types of the kinds in
-// generator/generator.yaml from cloudflare-go v7, the SDK Cloudflare
-// generates from its OpenAPI spec, and from a committed subset of that spec,
-// which adds what the SDK's types leave out: lengths, patterns, ranges,
-// defaults and integers. Run it from the repository's root:
+// Command kflare-gen generates the kinds in generator/generator.yaml from
+// cloudflare-go v7, the SDK Cloudflare generates from its OpenAPI spec, and
+// from a committed subset of that spec, which adds what the SDK's types leave
+// out: lengths, patterns, ranges, defaults, integers and page sizes. For each
+// kind it writes the API types, the controller, its envtest table and a
+// sample, and it registers the kinds. Run it from the repository's root:
 //
-//	kflare-gen            generates the types (make codegen, which runs before
+//	kflare-gen            generates the kinds (make codegen, which runs before
 //	                      controller-gen)
 //	kflare-gen sync-spec  rewrites the spec subset from a full spec (make
 //	                      sync-spec)
@@ -20,7 +21,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -47,12 +48,12 @@ func generateCommand(args []string) error {
 	flags := flag.NewFlagSet("kflare-gen", flag.ContinueOnError)
 	configPath := flags.String("config", defaultConfig, "the kinds to generate")
 	specPath := flags.String("spec", defaultSpec, "the OpenAPI spec subset")
-	apiDir := flags.String("api", "api/v1alpha1", "the API package the types files go to")
-	headerPath := flags.String("header", "hack/boilerplate.go.txt", "the license header of every generated file")
+	root := flags.String("root", ".", "the repository the generated files go to")
+	headerPath := flags.String("header", "hack/boilerplate.go.txt", "the license header of every generated Go file")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	return run(*configPath, *specPath, *apiDir, *headerPath)
+	return run(*configPath, *specPath, *root, *headerPath)
 }
 
 func syncSpecCommand(args []string) error {
@@ -80,10 +81,11 @@ type stringList []string
 func (l *stringList) String() string     { return strings.Join(*l, ",") }
 func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
 
-// run generates the types files of the kinds in the configuration at
-// configPath into apiDir, and removes the types files kflare-gen wrote for
-// kinds the configuration no longer lists.
-func run(configPath, specPath, apiDir, headerPath string) error {
+// run generates the kinds in the configuration at configPath into the
+// repository at root, removes what kflare-gen generated for kinds the
+// configuration no longer lists, and rewrites the generated blocks of the
+// files it edits.
+func run(configPath, specPath, root, headerPath string) error {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return err
@@ -96,33 +98,17 @@ func run(configPath, specPath, apiDir, headerPath string) error {
 	if err != nil {
 		return err
 	}
-	files, err := generate(cfg, sdk{dir: "."}, spec, string(header))
+	out, err := generate(cfg, sdk{dir: "."}, spec, string(header))
 	if err != nil {
 		return err
 	}
-
-	existing, err := filepath.Glob(filepath.Join(apiDir, typesFile("*")))
-	if err != nil {
-		return err
-	}
-	for _, path := range existing {
-		if _, ok := files[filepath.Base(path)]; !ok {
-			if err := os.Remove(path); err != nil {
-				return err
-			}
-		}
-	}
-	for name, src := range files {
-		if err := os.WriteFile(filepath.Join(apiDir, name), src, 0o644); err != nil {
-			return err
-		}
-	}
-	return nil
+	return out.write(root)
 }
 
-// generate returns the types file of every kind in cfg, by file name.
-func generate(cfg *config, s sdk, spec *apiSpec, header string) (map[string][]byte, error) {
-	files := map[string][]byte{}
+// generate returns what kflare-gen writes for the kinds in cfg.
+func generate(cfg *config, s sdk, spec *apiSpec, header string) (*outputs, error) {
+	out := &outputs{files: map[string][]byte{}, blocks: map[string][]string{}}
+	var controllers []*controller
 	for _, entry := range cfg.Kinds {
 		svc, err := s.service(entry.Service)
 		if err != nil {
@@ -132,17 +118,24 @@ func generate(cfg *config, s sdk, spec *apiSpec, header string) (map[string][]by
 		if err != nil {
 			return nil, err
 		}
-		src, err := emitTypes(k, header)
+		c, err := buildController(k, entry, svc, spec)
 		if err != nil {
 			return nil, err
 		}
-		files[typesFile(strings.ToLower(entry.Kind))] = src
+		if err := out.addKind(c, header); err != nil {
+			return nil, err
+		}
+		controllers = append(controllers, c)
 	}
-	return files, nil
-}
-
-// typesFile is the name of a kind's types file. The zz_generated prefix keeps
-// generated files together, after the hand-written ones.
-func typesFile(lowerKind string) string {
-	return "zz_generated." + lowerKind + "_types.go"
+	slices.SortFunc(controllers, func(a, b *controller) int { return strings.Compare(a.name, b.name) })
+	src, err := emitKinds(controllers, header)
+	if err != nil {
+		return nil, err
+	}
+	out.files[kindsFile] = src
+	for _, c := range controllers {
+		out.blocks[crdKustomization] = append(out.blocks[crdKustomization], "- bases/kflare.dev_"+c.plural+".yaml")
+		out.blocks[helmRBAC] = append(out.blocks[helmRBAC], "- "+c.plural)
+	}
+	return out, nil
 }

@@ -23,3 +23,10 @@ spec:
       secretKeyRef:
         name: example-worker-secrets
         key: api-key
+# A KVNamespace or R2Bucket in the same namespace is bound by reference, such as
+# the KVNamespace sample:
+#
+#   bindings:
+#     - name: CACHE
+#       kvNamespaceRef:
+#         name: example-kvnamespace

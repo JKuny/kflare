@@ -15,9 +15,9 @@ import (
 )
 
 // syncSpec writes to out the subset of the full OpenAPI spec at from that the
-// kinds of the configurations use: the operations of their services' New, Get
-// and Update (or Edit) calls, with every component those reach. source says
-// where the full spec comes from; the subset records it.
+// kinds of the configurations use: the operations of their services' New, Get,
+// Update (or Edit) and List calls, with every component those reach. source
+// says where the full spec comes from; the subset records it.
 func syncSpec(configPaths []string, s sdk, from, source, out string) error {
 	var routes []route
 	for _, path := range configPaths {
@@ -33,6 +33,9 @@ func syncSpec(configPaths []string, s sdk, from, source, out string) error {
 			routes = append(routes, svc.newRoute, svc.getRoute)
 			if svc.update != nil {
 				routes = append(routes, svc.updateRoute)
+			}
+			if svc.calls["List"] != nil {
+				routes = append(routes, svc.listRoute)
 			}
 		}
 	}

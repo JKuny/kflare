@@ -1,9 +1,10 @@
-# The kinds kflare-gen generates, one entry each; `make codegen` writes their API types to
-# api/v1alpha1/zz_generated.<kind>_types.go. Every field of a kind's cloudflare-go v7 service (the params of New and
-# the object Get returns) becomes a field of the kind unless the entry ignores it, with the reason. Field names are the
-# API's, as in the SDK's json, path and query tags. Lengths, patterns, ranges, defaults and integers come from the
-# OpenAPI subset in generator/openapi; an entry that replaces a field's validation says why. See CLAUDE.md, "Code
-# generator (kflare-gen)".
+# The kinds kflare-gen generates, one entry each; `make codegen` writes their API types
+# (api/v1alpha1/zz_generated.<kind>_types.go), controllers and envtest tables
+# (internal/controller/zz_generated.<kind>.go and _test.go), samples and registration. Every field of a kind's
+# cloudflare-go v7 service (the params of New and the object Get returns) becomes a field of the kind unless the entry
+# ignores it, with the reason. Field names are the API's, as in the SDK's json, path and query tags. Lengths, patterns,
+# ranges, defaults, integers and page sizes come from the OpenAPI subset in generator/openapi; an entry that replaces a
+# field's validation says why. See CLAUDE.md, "Code generator (kflare-gen)".
 kinds:
   - kind: KVNamespace
     service: kv.NamespaceService
@@ -21,6 +22,15 @@ kinds:
         NamespaceID is the Cloudflare KV namespace identifier. WorkerScripts
         bind the namespace by this ID.
     claimLabel: kflare.dev/kv-namespace-id
+    adopt:
+      by: title
+    dependents:
+      - kind: WorkerScript
+        refs: boundKVNamespaces
+        reason: >-
+          Cloudflare deletes a namespace a Worker is bound to, but every later upload of that Worker then fails.
+    sample:
+      title: example-kv
     fields:
       title:
         doc: |

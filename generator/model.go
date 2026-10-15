@@ -18,6 +18,8 @@ import (
 // kind is the model of a generated kind: what its types file declares.
 type kind struct {
 	name, shortName, noun string
+	// plural is the kind's resource name, such as kvnamespaces.
+	plural string
 	// doc is the kind's documentation, one entry per line.
 	doc []string
 	// claimLabel is the value of the kind's claim label constant.
@@ -35,6 +37,9 @@ type kind struct {
 
 // field is one field of a generated struct.
 type field struct {
+	// apiName is the field's name in the API, such as title; "" for
+	// accountRef.
+	apiName                  string
 	goName, jsonName, goType string
 	doc                      []string
 	optional, immutable      bool
@@ -59,10 +64,11 @@ type printColumn struct {
 }
 
 // typeString is a string, both as a Go type and as a print column's type;
-// typeInt64 is the Go type of an integer.
+// typeInt64 and typeBool are the Go types of an integer and a bool.
 const (
 	typeString = "string"
 	typeInt64  = "int64"
+	typeBool   = "bool"
 )
 
 // markers returns a field's kubebuilder markers.
@@ -146,8 +152,8 @@ func (b *kindBuilder) build() (*kind, error) {
 	if err := b.loadSpec(); err != nil {
 		return nil, err
 	}
-	k := &kind{name: e.Kind, shortName: e.ShortName, noun: e.Noun, doc: lines(e.Doc), claimLabel: e.ClaimLabel,
-		fixed: map[string]string{}}
+	k := &kind{name: e.Kind, shortName: e.ShortName, noun: e.Noun, plural: plural(e.Kind), doc: lines(e.Doc),
+		claimLabel: e.ClaimLabel, fixed: map[string]string{}}
 	k.spec = append(k.spec, field{
 		goName: "AccountRef", jsonName: "accountRef", goType: "corev1.LocalObjectReference", immutable: true,
 		doc: []string{
@@ -267,7 +273,8 @@ func (b *kindBuilder) metadata(k *kind, inCreate map[string]bool) ([]printColumn
 		idDoc = id.doc
 	}
 	k.metadata = append(k.metadata, field{
-		goName: upperCamel(e.ID.Status), jsonName: e.ID.Status, goType: typeString, doc: lines(idDoc), optional: true,
+		apiName: e.ID.Field, goName: upperCamel(e.ID.Status), jsonName: e.ID.Status, goType: typeString,
+		doc: lines(idDoc), optional: true,
 	})
 	idColumn := e.ID.PrintColumn
 	if idColumn == "" {
@@ -377,7 +384,8 @@ func (b *kindBuilder) field(f sdkField, spec bool) (field, []printColumn, error)
 	if err != nil {
 		return field{}, nil, err
 	}
-	out := field{goName: f.goName, jsonName: lowerCamel(f.goName), goType: goType, optional: !spec || !f.required}
+	out := field{apiName: f.apiName, goName: f.goName, jsonName: lowerCamel(f.goName), goType: goType,
+		optional: !spec || !f.required}
 	parent := ".status.cloudflareMetadata."
 	if spec {
 		parent = ".spec."
@@ -444,7 +452,7 @@ func checkDefault(goType, def string) error {
 		if _, err := strconv.Unquote(def); err == nil {
 			return nil
 		}
-	case "bool":
+	case typeBool:
 		if def == "true" || def == "false" {
 			return nil
 		}
@@ -466,7 +474,7 @@ func goTypeOf(f sdkField, specType string) (goType, column string, err error) {
 		case types.String:
 			return typeString, typeString, nil
 		case types.Bool:
-			return "bool", "boolean", nil
+			return typeBool, "boolean", nil
 		case types.Float64, types.Int64, types.Int:
 			switch specType {
 			case "integer":

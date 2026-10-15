@@ -1,5 +1,8 @@
 # Kinds for kflare-gen's golden tests, each generated from a real cloudflare-go v7 service. Regenerate the golden
 # files with: go test ./generator -run TestGolden -update
+#
+# Only TestKVNamespace gets a controller: the shared CRUD reconciler cannot drive the list and R2 bucket services yet,
+# and TestGolden checks that kflare-gen says why. The others get their types.
 kinds:
   # Every field of the KV namespace service: an optional create-only enum (jurisdiction) and a computed bool.
   - kind: TestKVNamespace
@@ -12,6 +15,10 @@ kinds:
       field: id
       status: namespaceID
     claimLabel: kflare.dev/test-kv-namespace-id
+    adopt:
+      by: title
+    sample:
+      title: example-test-kv
 
   # A custom list: required create-only fields (kind, an enum, and name), an updatable optional one, computed strings.
   - kind: TestList
@@ -26,6 +33,11 @@ kinds:
       field: id
       status: listID
     claimLabel: kflare.dev/test-list-id
+    adopt:
+      by: name
+    sample:
+      name: test_list
+      kind: ip
     fields:
       name:
         printColumn: Name
@@ -46,6 +58,10 @@ kinds:
       field: name
       status: bucketName
     claimLabel: kflare.dev/test-r2-bucket-name
+    adopt:
+      by: name
+    sample:
+      name: test-bucket
     fields:
       name:
         validation:
@@ -69,6 +85,10 @@ kinds:
       field: id
       status: listID
     claimLabel: kflare.dev/test-ip-list-id
+    adopt:
+      by: name
+    sample:
+      name: test_ips
     fixed:
       kind: ip
     fields:

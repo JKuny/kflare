@@ -24,6 +24,7 @@ type apiSpec struct {
 		Schemas       map[string]*schema      `json:"schemas"`
 		RequestBodies map[string]*requestBody `json:"requestBodies"`
 		Responses     map[string]*response    `json:"responses"`
+		Parameters    map[string]*parameter   `json:"parameters"`
 	} `json:"components"`
 
 	// byRoute indexes the paths by their normalized route.
@@ -32,8 +33,17 @@ type apiSpec struct {
 
 // operation is one method of a path.
 type operation struct {
+	Parameters  []*parameter         `json:"parameters"`
 	RequestBody *requestBody         `json:"requestBody"`
 	Responses   map[string]*response `json:"responses"`
+}
+
+// parameter is a path, query or header parameter of an operation.
+type parameter struct {
+	Ref    string  `json:"$ref"`
+	Name   string  `json:"name"`
+	In     string  `json:"in"`
+	Schema *schema `json:"schema"`
 }
 
 type requestBody struct {
@@ -119,6 +129,35 @@ func (s *apiSpec) operation(r route) (*operation, error) {
 		return nil, fmt.Errorf("%s %s: %w", r.verb, r.path, err)
 	}
 	return op, nil
+}
+
+// pageSize returns the most objects a page of a list may hold: the maximum of
+// the per_page query parameter of the list's operation.
+func (s *apiSpec) pageSize(list route) (int64, error) {
+	op, err := s.operation(list)
+	if err != nil {
+		return 0, err
+	}
+	for _, p := range op.Parameters {
+		if p.Ref != "" {
+			if p, err = component(s.Components.Parameters, p.Ref, "parameters"); err != nil {
+				return 0, err
+			}
+		}
+		if p.Name != "per_page" || p.In != inQuery {
+			continue
+		}
+		fs, err := s.fieldSpec(p.Schema)
+		if err != nil {
+			return 0, fmt.Errorf("%s's per_page: %w", list, err)
+		}
+		maximum := fs.validation.maximum
+		if maximum == nil || *maximum < 1 || *maximum != float64(int64(*maximum)) || fs.validation.exclusiveMaximum {
+			return 0, fmt.Errorf("%s's per_page has no maximum that is a whole number of objects", list)
+		}
+		return int64(*maximum), nil
+	}
+	return 0, fmt.Errorf("%s takes no per_page query parameter", list)
 }
 
 // requestProperties returns the properties of an operation's JSON request
