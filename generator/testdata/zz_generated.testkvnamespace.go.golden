@@ -61,7 +61,7 @@ type TestKVNamespaceReconciler struct {
 // unless another TestKVNamespace manages it, or else creates one. It changes
 // title in place. Jurisdiction is set when the KV namespace is created and
 // cannot change. A KV namespace deleted outside kflare is created again.
-var testKVNamespaceKind = crudResourceKind[*cloudflarev1alpha1.TestKVNamespace, TestKVNamespaceAPI, kv.Namespace]{
+var testKVNamespaceKind = crudResourceKind[*cloudflarev1alpha1.TestKVNamespace, TestKVNamespaceAPI, kv.Namespace, kv.Namespace]{
 	name:      "TestKVNamespace",
 	noun:      "KV namespace",
 	newObject: func() *cloudflarev1alpha1.TestKVNamespace { return &cloudflarev1alpha1.TestKVNamespace{} },
@@ -79,11 +79,12 @@ var testKVNamespaceKind = crudResourceKind[*cloudflarev1alpha1.TestKVNamespace, 
 		obj.Status.CloudflareMetadata.SupportsURLEncoding = current.SupportsURLEncoding
 	},
 
-	id:        func(current *kv.Namespace) string { return current.ID },
-	objectKey: func(current *kv.Namespace) string { return current.Title },
+	id: func(current *kv.Namespace) string { return current.ID },
 	matches: func(obj *cloudflarev1alpha1.TestKVNamespace, current *kv.Namespace) bool {
 		return current.Title == obj.Spec.Title
 	},
+	listedID:  func(listed *kv.Namespace) string { return listed.ID },
+	listedKey: func(listed *kv.Namespace) string { return listed.Title },
 
 	get: func(ctx context.Context, api TestKVNamespaceAPI, accountID, id string) (*kv.Namespace, error) {
 		var params kv.NamespaceGetParams
@@ -136,12 +137,12 @@ func (r *TestKVNamespaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // crud returns the shared CRUD reconciler for TestKVNamespaces, with the
 // injected factory or the production one.
-func (r *TestKVNamespaceReconciler) crud() *crudResourceReconciler[*cloudflarev1alpha1.TestKVNamespace, TestKVNamespaceAPI, kv.Namespace] {
+func (r *TestKVNamespaceReconciler) crud() *crudResourceReconciler[*cloudflarev1alpha1.TestKVNamespace, TestKVNamespaceAPI, kv.Namespace, kv.Namespace] {
 	newAPI := r.NewTestKVNamespaceAPI
 	if newAPI == nil {
 		newAPI = defaultTestKVNamespaceAPI
 	}
-	return &crudResourceReconciler[*cloudflarev1alpha1.TestKVNamespace, TestKVNamespaceAPI, kv.Namespace]{
+	return &crudResourceReconciler[*cloudflarev1alpha1.TestKVNamespace, TestKVNamespaceAPI, kv.Namespace, kv.Namespace]{
 		Client: r.Client, kind: testKVNamespaceKind, newAPI: newAPI,
 	}
 }

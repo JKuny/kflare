@@ -48,8 +48,10 @@ type service struct {
 	typeName string
 	// create holds the fields of New's params, update those of Update's (or
 	// Edit's), and object those of what Get returns. update is nil for a
-	// service that cannot change an object.
-	create, update, object []sdkField
+	// service that cannot change an object. listed holds the fields of the
+	// objects a page of List holds, when the service lists a struct of its
+	// package by page.
+	create, update, object, listed []sdkField
 	// newRoute, getRoute, updateRoute and listRoute are the routes of New,
 	// Get, Update (or Edit) and List, which find their operations in the
 	// OpenAPI spec. updateRoute is empty when update is nil, and listRoute
@@ -190,12 +192,35 @@ func (s sdk) service(name string) (*service, error) {
 		}
 		svc.calls[method] = c
 	}
-	if svc.calls["List"] != nil {
+	if list := svc.calls["List"]; list != nil {
 		if svc.listRoute, err = routeOf("List"); err != nil {
 			return nil, err
 		}
+		if elem, ok := pageElement(list.sig.Results().At(0).Type()); ok {
+			// Not a struct of the package: listed stays nil, and kflare-gen
+			// says why when it builds the kind's controller.
+			svc.listed, _ = r.fields(elem, false)
+		}
 	}
 	return svc, nil
+}
+
+// paginationPackage holds cloudflare-go v7's pages of a list.
+const paginationPackage = sdkModule + "/packages/pagination"
+
+// pageElement returns T for *pagination.V4PagePaginationArray[T], the page a
+// list by page number returns.
+func pageElement(t types.Type) (types.Type, bool) {
+	ptr, ok := t.(*types.Pointer)
+	if !ok {
+		return nil, false
+	}
+	named, ok := ptr.Elem().(*types.Named)
+	if !ok || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != paginationPackage ||
+		named.Obj().Name() != "V4PagePaginationArray" || named.TypeArgs().Len() != 1 {
+		return nil, false
+	}
+	return named.TypeArgs().At(0), true
 }
 
 // apiMDCall matches a call in a cloudflare-go v7 api.md: its route, then the

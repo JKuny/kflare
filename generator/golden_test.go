@@ -48,7 +48,7 @@ var refusedControllers = map[string]string{
 	"TestIPList": "New returns *rules.ListNewResponse and Get *rules.ListGetResponse: " +
 		"the shared CRUD reconciler needs one object type yet",
 	"TestR2Bucket": "the service's List returns *r2.BucketListResponse: the shared CRUD reconciler can only page " +
-		"through a pagination.V4PagePaginationArray of Get's object yet",
+		"through a pagination.V4PagePaginationArray yet",
 }
 
 // goldenFiles generates the kinds of testdata/generator.yaml, each from a

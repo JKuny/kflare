@@ -17,6 +17,7 @@ import (
 	"time"
 
 	cf "github.com/cloudflare/cloudflare-go"
+	"github.com/cloudflare/cloudflare-go/v7/d1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -72,14 +73,18 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		k8s       client.Client
 		cfAPI     *cf.API
 		accountRC *cf.ResourceContainer
+		accountID string
 		run       string
 		zoneName  string
+		// databases is cloudflare-go v7's D1 service: v0 does not report a
+		// database's jurisdiction.
+		databases *d1.DatabaseService
 
 		accountKey, tunnelKey, tunnelConfigKey, workerKey, zoneKey, recordKey client.ObjectKey
 		routeKey, exclusionKey, kvKey, bucketKey, wafKey, wafSkipKey          client.ObjectKey
-		rateLimitKey, listKey, listRuleKey, managedKey                        client.ObjectKey
+		rateLimitKey, listKey, listRuleKey, managedKey, d1Key                 client.ObjectKey
 
-		tunnelID, zoneID, recordID, routeID, exclusionID, kvNamespaceID, listID string
+		tunnelID, zoneID, recordID, routeID, exclusionID, kvNamespaceID, listID, databaseID string
 	)
 
 	// resourceName is the name of every Cloudflare object this run creates.
@@ -106,7 +111,8 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 	}
 
 	BeforeAll(func() {
-		token, accountID := os.Getenv("CF_API_TOKEN"), os.Getenv("CF_ACCOUNT_ID")
+		token := os.Getenv("CF_API_TOKEN")
+		accountID = os.Getenv("CF_ACCOUNT_ID")
 		if token == "" || accountID == "" {
 			Skip("CF_API_TOKEN and CF_ACCOUNT_ID are not set")
 		}
@@ -127,6 +133,9 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		cfAPI, err = cf.NewWithAPIToken(token)
 		Expect(err).NotTo(HaveOccurred())
 		accountRC = cf.AccountIdentifier(accountID)
+		cfClient, err := cfpkg.New(token)
+		Expect(err).NotTo(HaveOccurred())
+		databases = d1.NewDatabaseService(cfClient.V7Options()...)
 
 		accountKey = client.ObjectKey{Name: resourceName()}
 		tunnelKey = client.ObjectKey{Namespace: e2eNamespace, Name: "tunnel"}
@@ -144,6 +153,7 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		listKey = client.ObjectKey{Namespace: e2eNamespace, Name: "ip-list"}
 		listRuleKey = client.ObjectKey{Namespace: e2eNamespace, Name: "waf-list"}
 		managedKey = client.ObjectKey{Namespace: e2eNamespace, Name: "managed-ruleset"}
+		d1Key = client.ObjectKey{Namespace: e2eNamespace, Name: "d1"}
 
 		DeferCleanup(func() {
 			By("removing anything this run left behind in Cloudflare")
@@ -157,6 +167,7 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 			if err := cfAPI.DeleteR2Bucket(ctx, accountRC, resourceName()); err != nil && !cfpkg.IsNotFound(err) {
 				GinkgoWriter.Printf("cleanup: deleting R2 bucket %s: %v\n", resourceName(), err)
 			}
+			cleanupD1Database(ctx, cfAPI, accountRC, resourceName())
 			if zoneID != "" {
 				cleanupRules(ctx, cfAPI, zoneID, customRulesPhase, ruleRef("WAFCustomRule", wafKey),
 					ruleRef("WAFCustomRule", wafSkipKey), ruleRef("WAFCustomRule", listRuleKey))
@@ -284,6 +295,53 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		cfBucket, err := cfAPI.GetR2Bucket(ctx, accountRC, resourceName())
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfBucket.Location).To(Equal(bucket.Status.CloudflareMetadata.Location))
+	})
+
+	It("creates a D1Database in a jurisdiction, and adopts the database by name once it is retained", func() {
+		newDatabase := func() *cloudflarev1alpha1.D1Database {
+			return &cloudflarev1alpha1.D1Database{
+				ObjectMeta: objectMeta(d1Key),
+				Spec: cloudflarev1alpha1.D1DatabaseSpec{
+					AccountRef:   corev1.LocalObjectReference{Name: accountKey.Name},
+					Name:         resourceName(),
+					Jurisdiction: "eu",
+				},
+			}
+		}
+		getDatabase := func(id string) (*d1.D1, error) {
+			var params d1.DatabaseGetParams
+			params.AccountID.Value, params.AccountID.Present = accountID, true
+			return databases.Get(ctx, id, params)
+		}
+
+		db := newDatabase()
+		Expect(k8s.Create(ctx, db)).To(Succeed())
+		expectReady(d1Key, db, func() []metav1.Condition { return db.Status.Conditions })
+		databaseID = db.Status.CloudflareMetadata.DatabaseID
+		Expect(databaseID).NotTo(BeEmpty())
+		Expect(db.Labels).To(HaveKeyWithValue(cloudflarev1alpha1.D1DatabaseIDLabel, databaseID))
+		Expect(db.Status.CloudflareMetadata.Version).To(Equal("production"))
+
+		cfDatabase, err := getDatabase(databaseID)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfDatabase.Name).To(Equal(resourceName()))
+		Expect(string(cfDatabase.Jurisdiction)).To(Equal("eu"))
+
+		By("deleting it with the retain policy, which keeps the database")
+		patch := client.MergeFrom(db.DeepCopy())
+		db.Annotations = map[string]string{reconciler.DeletionPolicyAnnotation: reconciler.DeletionPolicyRetain}
+		Expect(k8s.Patch(ctx, db, patch)).To(Succeed())
+		Expect(k8s.Delete(ctx, db)).To(Succeed())
+		expectGone(d1Key, &cloudflarev1alpha1.D1Database{})
+		_, err = getDatabase(databaseID)
+		Expect(err).NotTo(HaveOccurred(), "the retained database was deleted")
+
+		By("creating a D1Database with the same name, which adopts the database through the list")
+		db = newDatabase()
+		Expect(k8s.Create(ctx, db)).To(Succeed())
+		expectReady(d1Key, db, func() []metav1.Condition { return db.Status.Conditions })
+		Expect(db.Status.CloudflareMetadata.DatabaseID).To(Equal(databaseID), "a new database was created")
+		Expect(d1DatabaseIDs(ctx, cfAPI, accountRC, resourceName())).To(ConsistOf(databaseID))
 	})
 
 	It("uploads a WorkerScript bound to the KVNamespace and R2Bucket", func() {
@@ -669,7 +727,7 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 
 		// One delete for everything, in no particular order, like `kubectl delete
 		// -f` on a directory: parents must wait for the children that need them
-		// (Zone, Tunnel, KVNamespace, R2Bucket, CloudflareAccount and its token Secret),
+		// (Zone, Tunnel, KVNamespace, R2Bucket, D1Database, CloudflareAccount and its token Secret),
 		// and Cloudflare deletes the IP list only once the rule using it is gone.
 		By("deleting every resource at once")
 		everything := []client.Object{
@@ -686,6 +744,7 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 			&cloudflarev1alpha1.WorkerScript{ObjectMeta: objectMeta(workerKey)},
 			&cloudflarev1alpha1.KVNamespace{ObjectMeta: objectMeta(kvKey)},
 			&cloudflarev1alpha1.R2Bucket{ObjectMeta: objectMeta(bucketKey)},
+			&cloudflarev1alpha1.D1Database{ObjectMeta: objectMeta(d1Key)},
 			&cloudflarev1alpha1.Tunnel{ObjectMeta: objectMeta(tunnelKey)},
 			&cloudflarev1alpha1.Zone{ObjectMeta: objectMeta(zoneKey)},
 			&cloudflarev1alpha1.CloudflareAccount{ObjectMeta: objectMeta(accountKey)},
@@ -709,6 +768,7 @@ var _ = Describe("Cloudflare", Ordered, Label("cloudflare"), func() {
 		Expect(kvNamespaces(ctx, cfAPI, accountRC)).NotTo(HaveKey(kvNamespaceID))
 		_, err = cfAPI.GetR2Bucket(ctx, accountRC, resourceName())
 		Expect(cfpkg.IsNotFound(err)).To(BeTrue(), "bucket was not deleted: %v", err)
+		Expect(d1DatabaseIDs(ctx, cfAPI, accountRC, resourceName())).To(BeEmpty(), "the D1 database was not deleted")
 		if listID != "" {
 			_, err = cfAPI.GetList(ctx, accountRC, listID)
 			Expect(cfpkg.IsNotFound(err)).To(BeTrue(), "IP list was not deleted: %v", err)
@@ -744,6 +804,20 @@ func kvNamespaces(ctx context.Context, api *cf.API, rc *cf.ResourceContainer) ma
 		out[ns.ID] = ns.Title
 	}
 	return out
+}
+
+// d1DatabaseIDs returns the IDs of the account's D1 databases named name.
+func d1DatabaseIDs(ctx context.Context, api *cf.API, rc *cf.ResourceContainer, name string) []string {
+	databases, _, err := api.ListD1Databases(ctx, rc, cf.ListD1DatabasesParams{Name: name})
+	Expect(err).NotTo(HaveOccurred())
+	var ids []string
+	for _, db := range databases {
+		// The name filter matches part of a name: compare it in full.
+		if db.Name == name {
+			ids = append(ids, db.UUID)
+		}
+	}
+	return ids
 }
 
 // workerNames lists the Worker script names in the account.
@@ -890,6 +964,24 @@ func cleanupList(ctx context.Context, api *cf.API, rc *cf.ResourceContainer, nam
 		}
 		if _, err := api.DeleteList(ctx, rc, list.ID); err != nil {
 			GinkgoWriter.Printf("cleanup: deleting IP list %s: %v\n", list.ID, err)
+		}
+	}
+}
+
+// cleanupD1Database deletes the account's D1 databases named name. It only
+// reports problems: it runs after the specs, whether or not they passed.
+func cleanupD1Database(ctx context.Context, api *cf.API, rc *cf.ResourceContainer, name string) {
+	databases, _, err := api.ListD1Databases(ctx, rc, cf.ListD1DatabasesParams{Name: name})
+	if err != nil {
+		GinkgoWriter.Printf("cleanup: listing D1 databases: %v\n", err)
+		return
+	}
+	for _, db := range databases {
+		if db.Name != name {
+			continue
+		}
+		if err := api.DeleteD1Database(ctx, rc, db.UUID); err != nil && !cfpkg.IsNotFound(err) {
+			GinkgoWriter.Printf("cleanup: deleting D1 database %s: %v\n", db.UUID, err)
 		}
 	}
 }

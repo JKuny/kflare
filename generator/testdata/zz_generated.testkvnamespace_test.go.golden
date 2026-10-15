@@ -31,7 +31,11 @@ var _ TestKVNamespaceAPI = fakeTestKVNamespaceAPI{}
 func (f fakeTestKVNamespaceAPI) New(_ context.Context, params kv.NamespaceNewParams,
 	_ ...option.RequestOption) (*kv.Namespace, error) {
 	return f.create(params.AccountID.Value, func(id string) kv.Namespace {
-		return kv.Namespace{ID: id, Title: params.Title.Value, Jurisdiction: kv.NamespaceJurisdiction(params.Jurisdiction.Value)}
+		return kv.Namespace{
+			ID:           id,
+			Title:        params.Title.Value,
+			Jurisdiction: kv.NamespaceJurisdiction(params.Jurisdiction.Value),
+		}
 	})
 }
 
@@ -42,7 +46,10 @@ func (f fakeTestKVNamespaceAPI) Get(_ context.Context, id string, params kv.Name
 
 func (f fakeTestKVNamespaceAPI) List(_ context.Context, params kv.NamespaceListParams,
 	_ ...option.RequestOption) (*pagination.V4PagePaginationArray[kv.Namespace], error) {
-	return f.list(params.AccountID.Value, int64(params.Page.Value), int64(params.PerPage.Value))
+	return fakeList(f.fakeCRUDStore, params.AccountID.Value, int64(params.Page.Value), int64(params.PerPage.Value),
+		func(current *kv.Namespace) kv.Namespace {
+			return *current
+		})
 }
 
 func (f fakeTestKVNamespaceAPI) Update(_ context.Context, id string, params kv.NamespaceUpdateParams,
@@ -62,11 +69,12 @@ func (f fakeTestKVNamespaceAPI) Delete(_ context.Context, id string, params kv.N
 	return new(kv.NamespaceDeleteResponse), nil
 }
 
-var _ = describeCRUDKind(crudKindSpecs[*cloudflarev1alpha1.TestKVNamespace, TestKVNamespaceAPI, kv.Namespace]{
+var _ = describeCRUDKind(crudKindSpecs[*cloudflarev1alpha1.TestKVNamespace, TestKVNamespaceAPI, kv.Namespace, kv.Namespace]{
 	kind:     testKVNamespaceKind,
 	keyField: "title",
 	pageSize: testKVNamespaceListPageSize,
-	newReconciler: func(c client.Client, newAPI func(string) (TestKVNamespaceAPI, error)) crudKindReconciler[*cloudflarev1alpha1.TestKVNamespace, TestKVNamespaceAPI, kv.Namespace] {
+	newReconciler: func(c client.Client,
+		newAPI func(string) (TestKVNamespaceAPI, error)) crudKindReconciler[*cloudflarev1alpha1.TestKVNamespace, TestKVNamespaceAPI, kv.Namespace, kv.Namespace] {
 		return &TestKVNamespaceReconciler{Client: c, Scheme: c.Scheme(), NewTestKVNamespaceAPI: newAPI}
 	},
 	newFake:    func(store *fakeCRUDStore[kv.Namespace]) TestKVNamespaceAPI { return fakeTestKVNamespaceAPI{store} },

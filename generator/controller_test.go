@@ -54,6 +54,7 @@ func cloneService(svc *service) *service {
 		out.calls[name] = &c
 	}
 	out.create, out.update, out.object = slices.Clone(svc.create), slices.Clone(svc.update), slices.Clone(svc.object)
+	out.listed = slices.Clone(svc.listed)
 	return &out
 }
 
@@ -190,6 +191,14 @@ func TestBuildControllerRefuses(t *testing.T) {
 		{"adoption by an optional field", func(_ *service, entry *kindConfig, _ *apiSpec) {
 			entry.Adopt.By = "jurisdiction"
 		}, "adopt.by: jurisdiction is not a required string"},
+		{"a List of objects kflare-gen cannot read", func(svc *service, _ *kindConfig, _ *apiSpec) { svc.listed = nil },
+			"the service's List returns pages of kv.Namespace, which kflare-gen cannot read"},
+		{"a List without the ID", func(svc *service, _ *kindConfig, _ *apiSpec) {
+			svc.listed = without(slices.Clone(svc.listed), "id")
+		}, "the objects List returns have no id, the ID"},
+		{"adoption by a field the List does not report", func(svc *service, _ *kindConfig, _ *apiSpec) {
+			svc.listed = without(slices.Clone(svc.listed), "title")
+		}, "adopt.by: the objects List returns do not report title"},
 		{"adoption by a field Get does not report", func(svc *service, _ *kindConfig, _ *apiSpec) {
 			svc.object = without(svc.object, "title")
 			svc.update, svc.updateMethod = nil, ""
@@ -265,20 +274,72 @@ func TestCheckShape(t *testing.T) {
 	}
 }
 
-func TestIsPageOf(t *testing.T) {
+func TestPageElement(t *testing.T) {
 	c := kvController(t)
 	page := c.list.sig.Results().At(0).Type()
-	if !isPageOf(page, c.object) {
-		t.Errorf("isPageOf(%s, %s) = false", typeName(page), typeName(c.object))
+	if elem, ok := pageElement(page); !ok || !types.Identical(elem, c.object) {
+		t.Errorf("pageElement(%s) = %v, %t", typeName(page), elem, ok)
 	}
-	for _, tc := range []struct{ t, object types.Type }{
-		{page, types.Typ[types.String]},
-		{c.object, c.object},
-		{types.NewPointer(c.object), c.object},
-	} {
-		if isPageOf(tc.t, tc.object) {
-			t.Errorf("isPageOf(%s, %s) = true", typeName(tc.t), typeName(tc.object))
+	for _, typ := range []types.Type{c.object, types.NewPointer(c.object), types.NewPointer(types.Typ[types.String])} {
+		if _, ok := pageElement(typ); ok {
+			t.Errorf("pageElement(%s) = true", typeName(typ))
 		}
+	}
+}
+
+func TestBuildControllerForAListOfAnotherType(t *testing.T) {
+	entry := kvControllerEntry()
+	entry.Service, entry.ID = "d1.DatabaseService", idConfig{Field: "uuid", Status: "databaseID"}
+	entry.Adopt.By, entry.Sample = "name", map[string]any{"name": "example"}
+	entry.Ignore = map[string]string{"read_replication": "nested", "created_at": "a time", "file_size": "a number",
+		"num_tables": "a number"}
+	c, err := buildTestController(t, entry, loadTestService(t, "d1.DatabaseService"), loadTestSpec(t))
+	if err != nil {
+		t.Fatalf("buildController: %v", err)
+	}
+	if typeName(c.object) != "d1.D1" || typeName(c.listed) != "d1.DatabaseListResponse" ||
+		c.listedID.goName != "UUID" || c.listedKey.goName != "Name" {
+		t.Errorf("object %s, listed %s (ID %s, key %s)", typeName(c.object), typeName(c.listed), c.listedID.goName,
+			c.listedKey.goName)
+	}
+	if c.update != nil || slices.Contains(c.calls(), c.svc.calls["Update"]) {
+		t.Errorf("an Update that takes only an ignored field is dropped: %v", c.update)
+	}
+	if c.pageSize != 10000 {
+		t.Errorf("page size = %d, want the spec's maximum per_page, 10000", c.pageSize)
+	}
+	got, err := listedObject(newGoFile(), c)
+	if want := "d1.DatabaseListResponse{\nCreatedAt: current.CreatedAt,\n" +
+		"Jurisdiction: d1.DatabaseListResponseJurisdiction(current.Jurisdiction),\nName: current.Name,\n" +
+		"UUID: current.UUID,\nVersion: current.Version,\n}"; err != nil || got != want {
+		t.Errorf("listedObject = %q, %v, want %q", got, err, want)
+	}
+}
+
+func TestListedObject(t *testing.T) {
+	c := kvController(t)
+	if got, err := listedObject(newGoFile(), c); err != nil || got != "*current" {
+		t.Errorf("a list of Get's type: listedObject = %q, %v", got, err)
+	}
+
+	pkg := types.NewPackage(sdkModule+"/kv", "kv")
+	c.listed = types.NewNamed(types.NewTypeName(token.NoPos, pkg, "NamespaceListResponse", nil),
+		types.NewStruct(nil, nil), nil)
+	svc := cloneService(c.svc)
+	svc.listed = []sdkField{
+		{goName: "ID", apiName: "id", typ: types.Typ[types.String]},
+		{goName: "Encoding", apiName: "supports_url_encoding", typ: types.Typ[types.String]},
+		{goName: "Elsewhere", apiName: "elsewhere", typ: types.Typ[types.String]},
+		{goName: "Title", apiName: "title", typ: types.Typ[types.String]},
+	}
+	c.svc = svc
+	if got, err := listedObject(newGoFile(), c); err != nil ||
+		got != "kv.NamespaceListResponse{ID: current.ID, Title: current.Title}" {
+		t.Errorf("listedObject = %q, %v: a field the object lacks or the fake cannot copy stays empty", got, err)
+	}
+	svc.listed[0].typ = types.Typ[types.Bool]
+	if _, err := listedObject(newGoFile(), c); err == nil || !strings.Contains(err.Error(), "id: ") {
+		t.Errorf("an ID the fake cannot copy: err = %v", err)
 	}
 }
 
@@ -557,11 +618,9 @@ func TestEmitControllerRefusesWhatItCannotConvert(t *testing.T) {
 	}{
 		{"a status field of another kind", func(c *controller) { c.status[1].object.typ = types.Typ[types.String] },
 			"status.cloudflareMetadata.supportsURLEncoding"},
-		{"an adoption key of another kind", func(c *controller) {
-			o := *c.key.object
-			o.typ = types.Typ[types.Bool]
-			c.key.object = &o
-		}, "adopt.by"},
+		{"an adoption key of another kind", func(c *controller) { c.listedKey.typ = types.Typ[types.Bool] }, "adopt.by"},
+		{"a listed ID of another kind", func(c *controller) { c.listedID.typ = types.Typ[types.Bool] },
+			"the listed ID"},
 		{"a page that is no number", func(c *controller) { c.page.typ = types.Typ[types.String] }, "List's page"},
 		{"an account that is no string", func(c *controller) {
 			c.get = &sdkCall{name: "Get", sig: c.get.sig, params: c.get.params,
