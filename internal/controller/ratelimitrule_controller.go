@@ -46,7 +46,7 @@ const rateLimitColoCharacteristic = "cf.colo.id"
 // rateLimitRuleKind describes RateLimitRule to the shared rule reconciler.
 var rateLimitRuleKind = rulesetRuleKind{
 	name:      "RateLimitRule",
-	phase:     rulesets.PhaseHTTPRatelimit,
+	phases:    []rulesets.Phase{rulesets.PhaseHTTPRatelimit},
 	newObject: func() rulesetRuleObject { return &cloudflarev1alpha1.RateLimitRule{} },
 	newList:   func() client.ObjectList { return &cloudflarev1alpha1.RateLimitRuleList{} },
 	definition: func(obj rulesetRuleObject) rulesets.RulesetNewParamsRule {

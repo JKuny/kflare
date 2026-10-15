@@ -90,3 +90,137 @@ kinds:
       created_at: A time, which kflare-gen cannot map yet.
       file_size: A number in the OpenAPI spec, not an integer.
       num_tables: Deprecated in cloudflare-go v7, which says the count is no longer accurate.
+
+# The rule kinds kflare-gen generates: each resource manages one rule in a zone's entry point ruleset for a Rulesets
+# phase, through the shared rule controller (internal/controller/rulesetrule_controller.go). A rule kind's spec holds
+# the fields every rule kind shares (RulesetRuleSpec) and the parameters of its action, which kflare-gen builds from
+# cloudflare-go v7's rule type for the action and the rule's OpenAPI schema; field paths are the API's names, with []
+# for the items of a list or map. Each entry rule says what Cloudflare refuses, and gives a spec it refuses.
+ruleKinds:
+  - kind: TransformRule
+    rule: rulesets.RewriteRuleParam
+    shortName: cftransform
+    noun: transform rule
+    doc: |
+      TransformRule is the Schema for the transformrules API.
+      It manages one transform rule in a zone: a rewrite of the URL a request
+      reaches the origin with, or a change to its request or response headers.
+    typeDoc: |
+      Type is what the rule transforms, which picks the Rulesets phase its rule
+      is in:
+    types:
+      - name: urlRewrite
+        phase: http_request_transform
+        doc: rewrites the URL's path or query, with uri
+      - name: requestHeaders
+        phase: http_request_late_transform
+        doc: sets or removes headers of the request to the origin, with headers
+      - name: responseHeaders
+        phase: http_response_headers_transform
+        doc: adds, sets or removes headers of the response to the visitor, with headers
+    samples:
+      - type: urlRewrite
+        expression: 'http.request.uri.path eq "/old"'
+        description: Serve /old from /new
+        uri:
+          path:
+            value: /new
+      - type: requestHeaders
+        expression: 'starts_with(http.request.uri.path, "/api/")'
+        description: Tell the origin which country a request comes from
+        headers:
+          - name: x-visitor-country
+            operation: set
+            expression: ip.src.country
+      - type: responseHeaders
+        expression: 'true'
+        description: Keep pages out of frames and stop revealing the server's stack
+        headers:
+          - name: x-frame-options
+            operation: set
+            value: DENY
+          - name: x-powered-by
+            operation: remove
+    fields:
+      headers:
+        key: name
+        keyDoc: Name is the header's name.
+        doc: |
+          Headers are the headers the rule changes, with types requestHeaders and
+          responseHeaders. Cloudflare allows 30 in a rule (2026-10).
+      headers[].operation:
+        doc: |
+          Operation is what the rule does to the header: set replaces its value,
+          adding the header when the request or response has none; add adds a
+          header even when one is there, in responses only; remove removes it.
+      headers[].value:
+        doc: |
+          Value is the header's value, a static string, for set and add. Set
+          exactly one of value and expression, or neither for remove.
+      headers[].expression:
+        doc: |
+          Expression computes the header's value in Cloudflare's Rules language,
+          for set and add, for example `ip.src`.
+      uri:
+        doc: |
+          URI rewrites the URL the request reaches the origin with: its path, its
+          query, or both, with type urlRewrite. The visitor's URL does not change.
+      uri.path:
+        doc: |
+          Path rewrites the URL's path, to a static value or to what an
+          expression computes.
+      uri.path.value:
+        doc: Value is the new path, which starts with a slash.
+        validation:
+          minLength: 1
+          pattern: ^/
+          reason: Cloudflare refuses a path that does not start with a slash (20089), verified live on 2026-10-15.
+      uri.path.expression:
+        doc: |
+          Expression computes the new path, for example
+          `concat("/new", http.request.uri.path)`. Free plans cannot use
+          regex_replace.
+      uri.query:
+        doc: |
+          Query rewrites the URL's query string, to a static value or to what an
+          expression computes.
+      uri.query.value:
+        doc: |
+          Value is the new query string, without its question mark. An empty one
+          removes the query string.
+      uri.query.expression:
+        doc: Expression computes the new query string.
+    rules:
+      - rule: "self.type != 'urlRewrite' || (has(self.uri) && !has(self.headers))"
+        message: type urlRewrite takes uri and no headers
+        reason: Cloudflare refuses header rewrites in http_request_transform (20086), verified live on 2026-10-15.
+        invalid:
+          type: urlRewrite
+          expression: 'true'
+          headers:
+            - name: x-example
+              operation: set
+              value: '1'
+      - rule: "self.type == 'urlRewrite' || (has(self.headers) && !has(self.uri))"
+        message: types requestHeaders and responseHeaders take headers and no uri
+        reason: Cloudflare refuses URI rewrites in the header phases (20088), verified live on 2026-10-15.
+        invalid:
+          type: responseHeaders
+          expression: 'true'
+          uri:
+            path:
+              value: /new
+      - rule: "self.type != 'requestHeaders' || !has(self.headers) || self.headers.all(h, h.operation != 'add')"
+        message: operation add is for response headers only
+        reason: Cloudflare refuses add on a request header (20087), verified live on 2026-10-15.
+        invalid:
+          type: requestHeaders
+          expression: 'true'
+          headers:
+            - name: x-example
+              operation: add
+              value: '1'
+    ignore:
+      logging: Only skip rules log (20018 on a transform rule, verified live on 2026-10-15).
+      ratelimit: Rate limits are refused in the transform phases (20131, verified live on 2026-10-15).
+      exposed_credential_check: Refused in the transform phases (20189, verified live on 2026-10-15).

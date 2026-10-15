@@ -16,10 +16,12 @@ import (
 
 // syncSpec writes to out the subset of the full OpenAPI spec at from that the
 // kinds of the configurations use: the operations of their services' New, Get,
-// Update (or Edit) and List calls, with every component those reach. source
-// says where the full spec comes from; the subset records it.
+// Update (or Edit) and List calls, and the schemas of the rule kinds' rule
+// types, with every component those reach. source says where the full spec
+// comes from; the subset records it.
 func syncSpec(configPaths []string, s sdk, from, source, out string) error {
 	var routes []route
+	var schemas []string
 	for _, path := range configPaths {
 		cfg, err := loadConfig(path)
 		if err != nil {
@@ -38,6 +40,9 @@ func syncSpec(configPaths []string, s sdk, from, source, out string) error {
 				routes = append(routes, svc.listRoute)
 			}
 		}
+		for _, entry := range cfg.RuleKinds {
+			schemas = append(schemas, ruleSchemaName(entry.Rule))
+		}
 	}
 
 	data, err := os.ReadFile(from)
@@ -51,7 +56,7 @@ func syncSpec(configPaths []string, s sdk, from, source, out string) error {
 	if err := decoder.Decode(&full); err != nil {
 		return fmt.Errorf("%s: %w", from, err)
 	}
-	subset, err := specSubset(full, routes, source)
+	subset, err := specSubset(full, routes, schemas, source)
 	if err != nil {
 		return err
 	}
@@ -62,10 +67,10 @@ func syncSpec(configPaths []string, s sdk, from, source, out string) error {
 	return os.WriteFile(out, append(encoded, '\n'), 0o644)
 }
 
-// specSubset returns the operations of routes out of spec, with the
-// components they reach. Its maps marshal with sorted keys, so the subset
-// only changes where the spec does.
-func specSubset(spec map[string]any, routes []route, source string) (map[string]any, error) {
+// specSubset returns the operations of routes and the component schemas named
+// schemas out of spec, with the components they reach. Its maps marshal with
+// sorted keys, so the subset only changes where the spec does.
+func specSubset(spec map[string]any, routes []route, schemas []string, source string) (map[string]any, error) {
 	paths, _ := spec["paths"].(map[string]any)
 	components, _ := spec["components"].(map[string]any)
 	byRoute := map[string]string{}
@@ -98,6 +103,9 @@ func specSubset(spec map[string]any, routes []route, source string) (map[string]
 		pending = append(pending, op)
 	}
 
+	for _, name := range schemas {
+		pending = append(pending, map[string]any{"$ref": "#/components/schemas/" + name})
+	}
 	outComponents := map[string]any{}
 	copied := map[string]bool{}
 	for len(pending) > 0 {

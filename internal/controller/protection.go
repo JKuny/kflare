@@ -89,8 +89,9 @@ var (
 			func(l *cloudflarev1alpha1.IPList) []string { return []string{l.Spec.AccountRef.Name} }),
 	}, generatedAccountDependents...)
 
-	// zoneDependents live in a Zone's namespace and reference it by name.
-	zoneDependents = []dependentKind{
+	// zoneDependents live in a Zone's namespace and reference it by name: the
+	// hand-written kinds listed here, and the generated rule kinds.
+	zoneDependents = append([]dependentKind{
 		dependents("DNSRecord", func() client.ObjectList { return &cloudflarev1alpha1.DNSRecordList{} },
 			func(d *cloudflarev1alpha1.DNSRecord) []string { return []string{d.Spec.ZoneRef.Name} }),
 		dependents("WorkerRoute", func() client.ObjectList { return &cloudflarev1alpha1.WorkerRouteList{} },
@@ -101,7 +102,7 @@ var (
 			func(rl *cloudflarev1alpha1.RateLimitRule) []string { return []string{rl.Spec.ZoneRef.Name} }),
 		dependents("ManagedRuleset", func() client.ObjectList { return &cloudflarev1alpha1.ManagedRulesetList{} },
 			func(m *cloudflarev1alpha1.ManagedRuleset) []string { return []string{m.Spec.ZoneRef.Name} }),
-	}
+	}, generatedZoneDependents...)
 
 	// r2BucketDependents live in an R2Bucket's namespace and bind it through
 	// r2BucketRef.

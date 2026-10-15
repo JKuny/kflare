@@ -763,6 +763,985 @@
           }
         ]
       },
+      "rulesets_ExecuteCategoryOverrides": {
+        "description": "A list of category-level overrides. This option has the second-highest precedence after rule-level overrides.",
+        "items": {
+          "description": "A category-level override.",
+          "minProperties": 2,
+          "properties": {
+            "action": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/rulesets_RuleAction"
+                },
+                {
+                  "description": "The action to override rules in the category with.",
+                  "example": "log",
+                  "type": "string"
+                }
+              ]
+            },
+            "category": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/rulesets_RuleCategory"
+                },
+                {
+                  "description": "The name of the category to override.",
+                  "type": "string"
+                }
+              ]
+            },
+            "enabled": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/rulesets_RuleEnabled"
+                },
+                {
+                  "description": "Whether to enable execution of rules in the category.",
+                  "type": "boolean"
+                }
+              ]
+            },
+            "sensitivity_level": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/rulesets_ExecuteSensitivityLevel"
+                },
+                {
+                  "description": "The sensitivity level to use for rules in the category. This option is only applicable for DDoS phases.",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "required": [
+            "category"
+          ],
+          "title": "Category Override",
+          "type": "object"
+        },
+        "minItems": 1,
+        "title": "Category Overrides",
+        "type": "array",
+        "uniqueItems": true
+      },
+      "rulesets_ExecuteMatchedData": {
+        "description": "The configuration to use for matched data logging.",
+        "properties": {
+          "public_key": {
+            "description": "The public key to encrypt matched data logs with.",
+            "example": "iGqBmyIUxuWt1rvxoAharN9FUXneUBxA/Y19PyyrEG0=",
+            "minLength": 1,
+            "title": "Public Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "public_key"
+        ],
+        "title": "Matched Data",
+        "type": "object"
+      },
+      "rulesets_ExecuteOverrides": {
+        "description": "A set of overrides to apply to the target ruleset.",
+        "minProperties": 1,
+        "properties": {
+          "action": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/rulesets_RuleAction"
+              },
+              {
+                "description": "An action to override all rules with. This option has lower precedence than rule and category overrides.",
+                "example": "log",
+                "type": "string"
+              }
+            ]
+          },
+          "categories": {
+            "$ref": "#/components/schemas/rulesets_ExecuteCategoryOverrides"
+          },
+          "enabled": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/rulesets_RuleEnabled"
+              },
+              {
+                "description": "Whether to enable execution of all rules. This option has lower precedence than rule and category overrides.",
+                "type": "boolean"
+              }
+            ]
+          },
+          "rules": {
+            "$ref": "#/components/schemas/rulesets_ExecuteRuleOverrides"
+          },
+          "sensitivity_level": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/rulesets_ExecuteSensitivityLevel"
+              },
+              {
+                "description": "A sensitivity level to set for all rules. This option has lower precedence than rule and category overrides and is only applicable for DDoS phases.",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "title": "Overrides",
+        "type": "object"
+      },
+      "rulesets_ExecuteRule": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/rulesets_Rule"
+          },
+          {
+            "properties": {
+              "action": {
+                "enum": [
+                  "execute"
+                ],
+                "type": "string"
+              },
+              "action_parameters": {
+                "properties": {
+                  "id": {
+                    "allOf": [
+                      {
+                        "$ref": "#/components/schemas/rulesets_RulesetId"
+                      },
+                      {
+                        "description": "The ID of the ruleset to execute.",
+                        "example": "4814384a9e5d4991b9815dcfc25d2f1f",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "matched_data": {
+                    "$ref": "#/components/schemas/rulesets_ExecuteMatchedData"
+                  },
+                  "overrides": {
+                    "$ref": "#/components/schemas/rulesets_ExecuteOverrides"
+                  }
+                },
+                "required": [
+                  "id"
+                ],
+                "type": "object"
+              },
+              "description": {
+                "example": "Execute another ruleset.",
+                "type": "string"
+              }
+            },
+            "title": "Execute Rule",
+            "type": "object"
+          }
+        ]
+      },
+      "rulesets_ExecuteRuleOverrides": {
+        "description": "A list of rule-level overrides. This option has the highest precedence.",
+        "items": {
+          "description": "A rule-level override.",
+          "minProperties": 2,
+          "properties": {
+            "action": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/rulesets_RuleAction"
+                },
+                {
+                  "description": "The action to override the rule with.",
+                  "example": "log",
+                  "type": "string"
+                }
+              ]
+            },
+            "enabled": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/rulesets_RuleEnabled"
+                },
+                {
+                  "description": "Whether to enable execution of the rule.",
+                  "type": "boolean"
+                }
+              ]
+            },
+            "id": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/rulesets_RuleId"
+                },
+                {
+                  "description": "The ID of the rule to override.",
+                  "example": "8ac8bc2a661e475d940980f9317f28e1",
+                  "type": "string"
+                }
+              ]
+            },
+            "score_threshold": {
+              "description": "The score threshold to use for the rule.",
+              "title": "Score Threshold",
+              "type": "integer"
+            },
+            "sensitivity_level": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/rulesets_ExecuteSensitivityLevel"
+                },
+                {
+                  "description": "The sensitivity level to use for the rule. This option is only applicable for DDoS phases.",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "title": "Rule Override",
+          "type": "object"
+        },
+        "minItems": 1,
+        "title": "Rule Overrides",
+        "type": "array",
+        "uniqueItems": true
+      },
+      "rulesets_ExecuteSensitivityLevel": {
+        "enum": [
+          "default",
+          "medium",
+          "low",
+          "eoff"
+        ],
+        "example": "default",
+        "title": "Sensitivity Level",
+        "type": "string"
+      },
+      "rulesets_RewriteHeaderExpression": {
+        "description": "An expression that evaluates to a value for the header.",
+        "example": "ip.src",
+        "minLength": 1,
+        "title": "Header Expression",
+        "type": "string"
+      },
+      "rulesets_RewriteHeaderOperation": {
+        "description": "The operation to perform on the header.",
+        "title": "Operation",
+        "type": "string"
+      },
+      "rulesets_RewriteHeaderValue": {
+        "description": "A static value for the header.",
+        "example": "my-header-value",
+        "minLength": 1,
+        "title": "Header Value",
+        "type": "string"
+      },
+      "rulesets_RewriteHeaders": {
+        "additionalProperties": {
+          "oneOf": [
+            {
+              "description": "A header with a static value to add.",
+              "properties": {
+                "operation": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/rulesets_RewriteHeaderOperation"
+                    },
+                    {
+                      "enum": [
+                        "add"
+                      ],
+                      "type": "string"
+                    }
+                  ]
+                },
+                "value": {
+                  "$ref": "#/components/schemas/rulesets_RewriteHeaderValue"
+                }
+              },
+              "required": [
+                "operation",
+                "value"
+              ],
+              "title": "Add Static Header",
+              "type": "object"
+            },
+            {
+              "description": "A header with a dynamic value to add.",
+              "properties": {
+                "expression": {
+                  "$ref": "#/components/schemas/rulesets_RewriteHeaderExpression"
+                },
+                "operation": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/rulesets_RewriteHeaderOperation"
+                    },
+                    {
+                      "enum": [
+                        "add"
+                      ],
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "operation",
+                "expression"
+              ],
+              "title": "Add Dynamic Header",
+              "type": "object"
+            },
+            {
+              "description": "A header with a static value to set.",
+              "properties": {
+                "operation": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/rulesets_RewriteHeaderOperation"
+                    },
+                    {
+                      "enum": [
+                        "set"
+                      ],
+                      "type": "string"
+                    }
+                  ]
+                },
+                "value": {
+                  "$ref": "#/components/schemas/rulesets_RewriteHeaderValue"
+                }
+              },
+              "required": [
+                "operation",
+                "value"
+              ],
+              "title": "Set Static Header",
+              "type": "object"
+            },
+            {
+              "description": "A header with a dynamic value to set.",
+              "properties": {
+                "expression": {
+                  "$ref": "#/components/schemas/rulesets_RewriteHeaderExpression"
+                },
+                "operation": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/rulesets_RewriteHeaderOperation"
+                    },
+                    {
+                      "enum": [
+                        "set"
+                      ],
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "operation",
+                "expression"
+              ],
+              "title": "Set Dynamic Header",
+              "type": "object"
+            },
+            {
+              "description": "A header to remove.",
+              "properties": {
+                "operation": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/rulesets_RewriteHeaderOperation"
+                    },
+                    {
+                      "enum": [
+                        "remove"
+                      ],
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "operation"
+              ],
+              "title": "Remove Header",
+              "type": "object"
+            }
+          ]
+        },
+        "description": "A map of headers to rewrite.",
+        "example": {
+          "client-http-version": {
+            "expression": "http.request.version",
+            "operation": "set"
+          }
+        },
+        "minProperties": 1,
+        "title": "Headers",
+        "type": "object"
+      },
+      "rulesets_RewriteRule": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/rulesets_Rule"
+          },
+          {
+            "properties": {
+              "action": {
+                "enum": [
+                  "rewrite"
+                ],
+                "type": "string"
+              },
+              "action_parameters": {
+                "minProperties": 1,
+                "properties": {
+                  "headers": {
+                    "$ref": "#/components/schemas/rulesets_RewriteHeaders"
+                  },
+                  "uri": {
+                    "$ref": "#/components/schemas/rulesets_RewriteUri"
+                  }
+                },
+                "type": "object"
+              },
+              "description": {
+                "example": "Rewrite properties of the request or response.",
+                "type": "string"
+              }
+            },
+            "title": "Rewrite Rule",
+            "type": "object"
+          }
+        ]
+      },
+      "rulesets_RewriteUri": {
+        "allOf": [
+          {
+            "anyOf": [
+              {
+                "description": "A URI path rewrite.",
+                "properties": {
+                  "path": {
+                    "$ref": "#/components/schemas/rulesets_RewriteUriPath"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "title": "URI Path",
+                "type": "object"
+              },
+              {
+                "description": "A URI query rewrite.",
+                "properties": {
+                  "query": {
+                    "$ref": "#/components/schemas/rulesets_RewriteUriQuery"
+                  }
+                },
+                "required": [
+                  "query"
+                ],
+                "title": "URI Query",
+                "type": "object"
+              }
+            ]
+          },
+          {
+            "properties": {
+              "origin": {
+                "description": "Whether to propagate the rewritten URI to origin.",
+                "example": false,
+                "readOnly": true,
+                "title": "Origin",
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "rulesets_RewriteUriPath": {
+        "description": "A URI path rewrite.",
+        "maxProperties": 1,
+        "minProperties": 1,
+        "properties": {
+          "expression": {
+            "description": "An expression that evaluates to a value to rewrite the URI path to.",
+            "example": "regex_replace(http.request.uri.path, \"/foo$\", \"/bar\")",
+            "minLength": 1,
+            "title": "Path Expression",
+            "type": "string"
+          },
+          "value": {
+            "description": "A value to rewrite the URI path to.",
+            "example": "/foo",
+            "minLength": 1,
+            "title": "Path Value",
+            "type": "string"
+          }
+        },
+        "title": "URI Path",
+        "type": "object"
+      },
+      "rulesets_RewriteUriQuery": {
+        "description": "A URI query rewrite.",
+        "maxProperties": 1,
+        "minProperties": 1,
+        "properties": {
+          "expression": {
+            "description": "An expression that evaluates to a value to rewrite the URI query to.",
+            "example": "regex_replace(http.request.uri.query, \"foo=bar\", \"\")",
+            "minLength": 1,
+            "title": "Query Expression",
+            "type": "string"
+          },
+          "value": {
+            "description": "A value to rewrite the URI query to.",
+            "example": "foo=bar",
+            "title": "Query Value",
+            "type": "string"
+          }
+        },
+        "title": "URI Query",
+        "type": "object"
+      },
+      "rulesets_Rule": {
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/rulesets_RuleAction"
+          },
+          "action_parameters": {
+            "default": {},
+            "description": "The parameters configuring the rule's action.",
+            "title": "Action Parameters",
+            "type": "object"
+          },
+          "categories": {
+            "$ref": "#/components/schemas/rulesets_RuleCategories"
+          },
+          "description": {
+            "default": "",
+            "description": "An informative description of the rule.",
+            "title": "Description",
+            "type": "string"
+          },
+          "enabled": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/rulesets_RuleEnabled"
+              },
+              {
+                "default": true,
+                "type": "boolean"
+              }
+            ]
+          },
+          "exposed_credential_check": {
+            "$ref": "#/components/schemas/rulesets_RuleExposedCredentialCheck"
+          },
+          "expression": {
+            "description": "The expression defining which traffic will match the rule.",
+            "example": "ip.src eq 1.1.1.1",
+            "minLength": 1,
+            "title": "Expression",
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/rulesets_RuleId"
+          },
+          "last_updated": {
+            "description": "The timestamp of when the rule was last modified.",
+            "example": "2000-01-01T00:00:00Z",
+            "format": "date-time",
+            "readOnly": true,
+            "title": "Last Updated",
+            "type": "string",
+            "x-stainless-skip": [
+              "terraform"
+            ]
+          },
+          "logging": {
+            "$ref": "#/components/schemas/rulesets_RuleLogging"
+          },
+          "ratelimit": {
+            "$ref": "#/components/schemas/rulesets_RuleRatelimit"
+          },
+          "ref": {
+            "description": "The reference of the rule (the rule's ID by default).",
+            "example": "my_ref",
+            "minLength": 1,
+            "title": "Ref",
+            "type": "string"
+          },
+          "version": {
+            "description": "The version of the rule.",
+            "example": "1",
+            "pattern": "^[0-9]+$",
+            "readOnly": true,
+            "title": "Version",
+            "type": "string",
+            "x-stainless-skip": [
+              "terraform"
+            ]
+          }
+        },
+        "required": [
+          "version",
+          "last_updated"
+        ],
+        "title": "Rule",
+        "type": "object"
+      },
+      "rulesets_RuleAction": {
+        "description": "The action to perform when the rule matches.",
+        "pattern": "^[a-z_]+$",
+        "title": "Action",
+        "type": "string"
+      },
+      "rulesets_RuleCategories": {
+        "description": "The categories of the rule.",
+        "items": {
+          "$ref": "#/components/schemas/rulesets_RuleCategory"
+        },
+        "minItems": 1,
+        "readOnly": true,
+        "title": "Categories",
+        "type": "array",
+        "uniqueItems": true
+      },
+      "rulesets_RuleCategory": {
+        "description": "The category of a rule.",
+        "example": "directory-traversal",
+        "minLength": 1,
+        "title": "Category",
+        "type": "string"
+      },
+      "rulesets_RuleEnabled": {
+        "description": "Whether the rule should be executed.",
+        "example": true,
+        "title": "Enabled",
+        "type": "boolean"
+      },
+      "rulesets_RuleExposedCredentialCheck": {
+        "description": "Configuration for exposed credential checking.",
+        "properties": {
+          "password_expression": {
+            "description": "An expression that selects the password used in the credentials check.",
+            "example": "url_decode(http.request.body.form[\\\"password\\\"][0])",
+            "minLength": 1,
+            "title": "Password Expression",
+            "type": "string"
+          },
+          "username_expression": {
+            "description": "An expression that selects the user ID used in the credentials check.",
+            "example": "url_decode(http.request.body.form[\\\"username\\\"][0])",
+            "minLength": 1,
+            "title": "Username Expression",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username_expression",
+          "password_expression"
+        ],
+        "title": "Exposed Credential Check",
+        "type": "object"
+      },
+      "rulesets_RuleId": {
+        "description": "The unique ID of the rule.",
+        "example": "3a03d665bac047339bb530ecb439a90d",
+        "pattern": "^[0-9a-f]{32}$",
+        "title": "Rule ID",
+        "type": "string"
+      },
+      "rulesets_RuleLogging": {
+        "description": "An object configuring the rule's logging behavior.",
+        "properties": {
+          "enabled": {
+            "description": "Whether to generate a log when the rule matches.",
+            "example": true,
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "Logging",
+        "type": "object"
+      },
+      "rulesets_RuleRatelimit": {
+        "description": "An object configuring the rule's rate limit behavior.",
+        "properties": {
+          "characteristics": {
+            "description": "Characteristics of the request on which the rate limit counter will be incremented.",
+            "items": {
+              "description": "The characteristic of the request.",
+              "example": "cf.colo.id",
+              "minLength": 1,
+              "title": "Characteristic",
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Characteristics",
+            "type": "array",
+            "uniqueItems": true
+          },
+          "counting_expression": {
+            "description": "An expression that defines when the rate limit counter should be incremented. It defaults to the same as the rule's expression.",
+            "example": "http.request.body.raw eq \"abcd\"",
+            "minLength": 1,
+            "title": "Counting Expression",
+            "type": "string"
+          },
+          "mitigation_timeout": {
+            "description": "Period of time in seconds after which the action will be disabled following its first execution.",
+            "example": 600,
+            "title": "Mitigation Timeout",
+            "type": "integer"
+          },
+          "period": {
+            "description": "Period in seconds over which the counter is being incremented.",
+            "example": 60,
+            "minimum": 0,
+            "title": "Period",
+            "type": "integer"
+          },
+          "requests_per_period": {
+            "description": "The threshold of requests per period after which the action will be executed for the first time.",
+            "example": 1000,
+            "minimum": 1,
+            "title": "Requests per Period",
+            "type": "integer"
+          },
+          "requests_to_origin": {
+            "default": false,
+            "description": "Whether counting is only performed when an origin is reached.",
+            "example": true,
+            "title": "Requests to Origin",
+            "type": "boolean"
+          },
+          "score_per_period": {
+            "description": "The score threshold per period for which the action will be executed the first time.",
+            "example": 400,
+            "title": "Score per Period",
+            "type": "integer"
+          },
+          "score_response_header_name": {
+            "description": "A response header name provided by the origin, which contains the score to increment rate limit counter with.",
+            "example": "my-score",
+            "minLength": 1,
+            "title": "Score Response Header Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "characteristics",
+          "period"
+        ],
+        "title": "Rate Limit",
+        "type": "object"
+      },
+      "rulesets_RulesetId": {
+        "description": "The unique ID of the ruleset.",
+        "example": "2f2feab2026849078ba485f918791bdc",
+        "pattern": "^[0-9a-f]{32}$",
+        "title": "Ruleset ID",
+        "type": "string"
+      },
+      "rulesets_RulesetPhase": {
+        "description": "The phase of the ruleset.",
+        "enum": [
+          "ddos_l4",
+          "ddos_l7",
+          "http_config_settings",
+          "http_custom_errors",
+          "http_log_custom_fields",
+          "http_ratelimit",
+          "http_request_cache_settings",
+          "http_request_dynamic_redirect",
+          "http_request_firewall_custom",
+          "http_request_firewall_managed",
+          "http_request_late_transform",
+          "http_request_origin",
+          "http_request_redirect",
+          "http_request_sanitize",
+          "http_request_sbfm",
+          "http_request_transform",
+          "http_response_cache_settings",
+          "http_response_compression",
+          "http_response_firewall_managed",
+          "http_response_headers_transform",
+          "magic_transit",
+          "magic_transit_ids_managed",
+          "magic_transit_managed",
+          "magic_transit_ratelimit"
+        ],
+        "example": "http_request_firewall_custom",
+        "title": "Phase",
+        "type": "string"
+      },
+      "rulesets_SkipPhase": {
+        "description": "A phase to skip the execution of. This option is only compatible with the products option.",
+        "enum": [
+          "current"
+        ],
+        "title": "Phase",
+        "type": "string"
+      },
+      "rulesets_SkipPhases": {
+        "description": "A list of phases to skip the execution of. This option is incompatible with the rulesets option.",
+        "items": {
+          "allOf": [
+            {
+              "$ref": "#/components/schemas/rulesets_RulesetPhase"
+            },
+            {
+              "description": "The phase to skip the execution of.",
+              "type": "string"
+            }
+          ]
+        },
+        "minItems": 1,
+        "title": "Phases",
+        "type": "array",
+        "uniqueItems": true
+      },
+      "rulesets_SkipProducts": {
+        "description": "A list of legacy security products to skip the execution of.",
+        "items": {
+          "description": "The name of a legacy security product to skip the execution of.",
+          "enum": [
+            "bic",
+            "hot",
+            "rateLimit",
+            "securityLevel",
+            "uaBlock",
+            "waf",
+            "zoneLockdown"
+          ],
+          "example": "bic",
+          "title": "Product",
+          "type": "string"
+        },
+        "minItems": 1,
+        "title": "Products",
+        "type": "array",
+        "uniqueItems": true
+      },
+      "rulesets_SkipRule": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/rulesets_Rule"
+          },
+          {
+            "properties": {
+              "action": {
+                "enum": [
+                  "skip"
+                ],
+                "type": "string"
+              },
+              "action_parameters": {
+                "minProperties": 1,
+                "properties": {
+                  "phase": {
+                    "$ref": "#/components/schemas/rulesets_SkipPhase"
+                  },
+                  "phases": {
+                    "$ref": "#/components/schemas/rulesets_SkipPhases"
+                  },
+                  "products": {
+                    "$ref": "#/components/schemas/rulesets_SkipProducts"
+                  },
+                  "rules": {
+                    "$ref": "#/components/schemas/rulesets_SkipRules"
+                  },
+                  "ruleset": {
+                    "$ref": "#/components/schemas/rulesets_SkipRuleset"
+                  },
+                  "rulesets": {
+                    "$ref": "#/components/schemas/rulesets_SkipRulesets"
+                  }
+                },
+                "type": "object"
+              },
+              "description": {
+                "example": "Skip executing rulesets, rules, phases, and other products.",
+                "type": "string"
+              }
+            },
+            "title": "Skip Rule",
+            "type": "object"
+          }
+        ]
+      },
+      "rulesets_SkipRules": {
+        "additionalProperties": {
+          "description": "A list of rule IDs in the ruleset to skip the execution of.",
+          "items": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/rulesets_RuleId"
+              },
+              {
+                "description": "The ID of a rule in the ruleset to skip the execution of.",
+                "example": "8ac8bc2a661e475d940980f9317f28e1",
+                "title": "Rule",
+                "type": "string"
+              }
+            ]
+          },
+          "minItems": 1,
+          "title": "Rules",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "description": "A mapping of ruleset IDs to a list of rule IDs in that ruleset to skip the execution of. This option is incompatible with the ruleset option.",
+        "example": {
+          "4814384a9e5d4991b9815dcfc25d2f1f": [
+            "8ac8bc2a661e475d940980f9317f28e1"
+          ]
+        },
+        "minProperties": 1,
+        "title": "Rules",
+        "type": "object"
+      },
+      "rulesets_SkipRuleset": {
+        "description": "A ruleset to skip the execution of. This option is incompatible with the rulesets option.",
+        "enum": [
+          "current"
+        ],
+        "title": "Ruleset",
+        "type": "string"
+      },
+      "rulesets_SkipRulesets": {
+        "description": "A list of ruleset IDs to skip the execution of. This option is incompatible with the ruleset and phases options.",
+        "items": {
+          "allOf": [
+            {
+              "$ref": "#/components/schemas/rulesets_RulesetId"
+            },
+            {
+              "description": "The ID of a ruleset to skip the execution of.",
+              "example": "4814384a9e5d4991b9815dcfc25d2f1f",
+              "title": "Ruleset",
+              "type": "string"
+            }
+          ]
+        },
+        "minItems": 1,
+        "title": "Rulesets",
+        "type": "array",
+        "uniqueItems": true
+      },
       "workers-kv_api-response-collection": {
         "allOf": [
           {

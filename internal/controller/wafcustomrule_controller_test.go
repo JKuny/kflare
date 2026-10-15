@@ -11,6 +11,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/cloudflare/cloudflare-go/v7/rulesets"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -594,7 +595,8 @@ var _ = Describe("WAFCustomRule peers", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: "peers-deleting", Namespace: "default"},
 		})).To(Succeed())
 
-		peers, err := (&WAFCustomRuleReconciler{Client: k8sClient}).rules().peers(ctx, "zone-peers")
+		rules := (&WAFCustomRuleReconciler{Client: k8sClient}).rules()
+		peers, err := rules.peers(ctx, "zone-peers", rulesets.PhaseHTTPRequestFirewallCustom)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(peers).To(ConsistOf(
 			rulesetRulePeer{
@@ -611,7 +613,8 @@ var _ = Describe("WAFCustomRule peers", func() {
 	It("returns the list error", func() {
 		cancelled, cancel := context.WithCancel(ctx)
 		cancel()
-		_, err := (&WAFCustomRuleReconciler{Client: k8sClient}).rules().peers(cancelled, "zone-peers")
+		rules := (&WAFCustomRuleReconciler{Client: k8sClient}).rules()
+		_, err := rules.peers(cancelled, "zone-peers", rulesets.PhaseHTTPRequestFirewallCustom)
 		Expect(err).To(HaveOccurred())
 	})
 })

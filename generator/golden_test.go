@@ -9,6 +9,7 @@ package main
 import (
 	"bytes"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -54,7 +55,8 @@ var refusedControllers = map[string]string{
 // goldenFiles generates the kinds of testdata/generator.yaml, each from a
 // real cloudflare-go v7 service, by golden file name: a kind's types, and the
 // controller, envtest table and sample of a kind whose controller kflare-gen
-// does not refuse. It checks that it refuses the others, and why.
+// does not refuse. It checks that it refuses the others, and why. Its rule
+// kinds, each from a real rule type, get all four.
 func goldenFiles(t *testing.T) map[string][]byte {
 	t.Helper()
 	cfg, err := loadConfig(filepath.Join("testdata", "generator.yaml"))
@@ -92,6 +94,19 @@ func goldenFiles(t *testing.T) map[string][]byte {
 			files[filepath.Base(path)] = src
 		}
 	}
+	for _, entry := range cfg.RuleKinds {
+		k, err := buildRuleKind(entry, loadTestRule(t, entry.Rule), spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := &outputs{files: map[string][]byte{}}
+		if err := out.addRuleKind(k, testHeader); err != nil {
+			t.Fatal(err)
+		}
+		for path, src := range out.files {
+			files[filepath.Base(path)] = src
+		}
+	}
 	return files
 }
 
@@ -99,9 +114,9 @@ func goldenFiles(t *testing.T) map[string][]byte {
 // golden files.
 func TestGolden(t *testing.T) {
 	files := goldenFiles(t)
-	if want := 4 + 3; len(files) != want {
-		t.Errorf("generated %d files, want %d: four types files, and the controller, specs and sample of one kind",
-			len(files), want)
+	if want := 4 + 3 + 2*4; len(files) != want {
+		t.Errorf("generated %d files, want %d: four types files, the controller, specs and sample of one kind, and "+
+			"the four files of each of two rule kinds", len(files), want)
 	}
 	for name, got := range files {
 		golden := filepath.Join("testdata", name+".golden")
@@ -122,10 +137,11 @@ func TestGolden(t *testing.T) {
 	}
 }
 
-// TestGoldenControllerCompiles type-checks the golden controller and envtest
-// table of TestKVNamespace in internal/controller, as if they were generated
-// there, with its golden types in api/v1alpha1. controller-gen writes a kind's
-// deepcopy methods, so the test writes the two its types need.
+// TestGoldenControllerCompiles type-checks the golden controllers and envtest
+// tables of TestKVNamespace and the test rule kinds in internal/controller, as
+// if they were generated there, with their golden types in api/v1alpha1.
+// controller-gen writes a kind's deepcopy methods, so the test writes the two
+// each kind's types need.
 func TestGoldenControllerCompiles(t *testing.T) {
 	root, err := filepath.Abs("..")
 	if err != nil {
@@ -138,18 +154,19 @@ func TestGoldenControllerCompiles(t *testing.T) {
 		}
 		return src
 	}
-	deepcopy := []byte(`package v1alpha1
+	overlay := map[string][]byte{}
+	for _, kind := range []string{"TestKVNamespace", "TestExecuteRule", "TestSkipRule"} {
+		lower := strings.ToLower(kind)
+		overlay[filepath.Join(root, typesFile(lower))] = read(filepath.Base(typesFile(lower)))
+		overlay[filepath.Join(root, apiDir, lower+"_deepcopy.go")] = []byte(fmt.Sprintf(`package v1alpha1
 
 import "k8s.io/apimachinery/pkg/runtime"
 
-func (in *TestKVNamespace) DeepCopyObject() runtime.Object     { out := *in; return &out }
-func (in *TestKVNamespaceList) DeepCopyObject() runtime.Object { out := *in; return &out }
-`)
-	overlay := map[string][]byte{
-		filepath.Join(root, typesFile("testkvnamespace")):          read("zz_generated.testkvnamespace_types.go"),
-		filepath.Join(root, apiDir, "testkvnamespace_deepcopy.go"): deepcopy,
-		filepath.Join(root, controllerFile("testkvnamespace")):     read("zz_generated.testkvnamespace.go"),
-		filepath.Join(root, controllerTestFile("testkvnamespace")): read("zz_generated.testkvnamespace_test.go"),
+func (in *%[1]s) DeepCopyObject() runtime.Object     { out := *in; return &out }
+func (in *%[1]sList) DeepCopyObject() runtime.Object { out := *in; return &out }
+`, kind))
+		overlay[filepath.Join(root, controllerFile(lower))] = read(filepath.Base(controllerFile(lower)))
+		overlay[filepath.Join(root, controllerTestFile(lower))] = read(filepath.Base(controllerTestFile(lower)))
 	}
 	pkgs, err := packages.Load(&packages.Config{
 		Mode:    packages.NeedName | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo,
@@ -165,12 +182,17 @@ func (in *TestKVNamespaceList) DeepCopyObject() runtime.Object { out := *in; ret
 		for _, e := range pkg.Errors {
 			t.Errorf("%s: %v", pkg.ID, e)
 		}
-		if pkg.Types != nil && pkg.Types.Scope().Lookup("fakeTestKVNamespaceAPI") != nil {
+		if pkg.Types == nil {
+			continue
+		}
+		scope := pkg.Types.Scope()
+		if scope.Lookup("fakeTestKVNamespaceAPI") != nil && scope.Lookup("testExecuteRuleKind") != nil &&
+			scope.Lookup("testSkipRuleKind") != nil {
 			checked++
 		}
 	}
 	if checked == 0 {
-		t.Error("no package type-checked holds the golden envtest table")
+		t.Error("no package type-checked holds the golden envtest tables")
 	}
 }
 

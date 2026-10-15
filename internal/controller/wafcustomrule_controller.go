@@ -41,7 +41,7 @@ type WAFCustomRuleReconciler struct {
 // wafCustomRuleKind describes WAFCustomRule to the shared rule reconciler.
 var wafCustomRuleKind = rulesetRuleKind{
 	name:      "WAFCustomRule",
-	phase:     rulesets.PhaseHTTPRequestFirewallCustom,
+	phases:    []rulesets.Phase{rulesets.PhaseHTTPRequestFirewallCustom},
 	newObject: func() rulesetRuleObject { return &cloudflarev1alpha1.WAFCustomRule{} },
 	newList:   func() client.ObjectList { return &cloudflarev1alpha1.WAFCustomRuleList{} },
 	definition: func(obj rulesetRuleObject) rulesets.RulesetNewParamsRule {

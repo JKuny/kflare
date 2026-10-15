@@ -31,11 +31,11 @@ import (
 )
 
 // Every rule kind (WAFCustomRule, RateLimitRule, ManagedRuleset, and the kinds
-// to come) reconciles the same way: wait for the Zone, resolve the account's token,
-// write the one rule the resource manages with syncRulesetRule
-// (rulesetrule.go), and delete it with the resource. The kind's own
-// controller supplies only what differs: its phase and how its spec becomes a
-// Cloudflare rule.
+// kflare-gen generates) reconciles the same way: wait for the Zone, resolve
+// the account's token, write the one rule the resource manages with
+// syncRulesetRule (rulesetrule.go), and delete it with the resource. The
+// kind's own controller supplies only what differs: its phase and how its
+// spec becomes a Cloudflare rule.
 
 // rulesetRuleRecheckInterval is how soon a resource that reordered rules
 // checks the order again: another resource may have been reordering the same
@@ -55,8 +55,11 @@ type rulesetRuleObject interface {
 type rulesetRuleKind struct {
 	// name is the kind's name. It is part of the ref of every rule of the kind.
 	name string
-	// phase is the Rulesets phase the kind's rules are in.
-	phase     rulesets.Phase
+	// phases are the Rulesets phases the kind's rules are in. A kind with
+	// several picks each resource's from its spec with phaseFor, from a field
+	// the CRD keeps immutable.
+	phases    []rulesets.Phase
+	phaseFor  func(rulesetRuleObject) rulesets.Phase
 	newObject func() rulesetRuleObject
 	newList   func() client.ObjectList
 	// definition returns the rule a resource of the kind asks for, without
@@ -70,6 +73,15 @@ type rulesetRuleKind struct {
 	conflicts map[int]string
 }
 
+// phase returns the phase obj's rule is in: the kind's only phase, or the one
+// its spec picks.
+func (k rulesetRuleKind) phase(obj rulesetRuleObject) rulesets.Phase {
+	if k.phaseFor == nil {
+		return k.phases[0]
+	}
+	return k.phaseFor(obj)
+}
+
 // conflict returns the condition reason for err when it carries one of the
 // kind's conflict codes.
 func (k rulesetRuleKind) conflict(err error) (string, bool) {
@@ -81,9 +93,11 @@ func (k rulesetRuleKind) conflict(err error) (string, bool) {
 	return "", false
 }
 
-// rulesetRuleKinds lists every rule kind. The rules of all the kinds that
-// share a phase are kept in one order (see syncRulesetRule).
-var rulesetRuleKinds = []rulesetRuleKind{wafCustomRuleKind, rateLimitRuleKind, managedRulesetKind}
+// rulesetRuleKinds lists every rule kind: the hand-written ones and those
+// kflare-gen generates. The rules of all the kinds that share a phase are
+// kept in one order (see syncRulesetRule).
+var rulesetRuleKinds = append([]rulesetRuleKind{wafCustomRuleKind, rateLimitRuleKind, managedRulesetKind},
+	generatedRulesetRuleKinds...)
 
 // rulesetRuleReconciler reconciles the resources of one rule kind. Each kind's
 // exported reconciler delegates to one.
@@ -140,15 +154,15 @@ func (r *rulesetRuleReconciler) reconcile(ctx context.Context, req ctrl.Request)
 		return invalidToken(ctx, r.Client, obj, err)
 	}
 
-	zoneID := zone.Status.CloudflareMetadata.ZoneID
-	peers, err := r.peers(ctx, zoneID)
+	zoneID, phase := zone.Status.CloudflareMetadata.ZoneID, r.kind.phase(obj)
+	peers, err := r.peers(ctx, zoneID, phase)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	ref := rulesetRuleRef(r.kind.name, obj.GetNamespace(), obj.GetName())
 	rule := r.kind.definition(obj)
 	rule.Ref.Value, rule.Ref.Present = ref, true
-	state, err := syncRulesetRule(ctx, cfAPI, zoneID, r.kind.phase, rule, peers)
+	state, err := syncRulesetRule(ctx, cfAPI, zoneID, phase, rule, peers)
 	if reason, ok := r.kind.conflict(err); ok {
 		return notReadyRetryAfter(ctx, r.Client, obj, &conditionError{
 			Reason:  reason,
@@ -162,7 +176,7 @@ func (r *rulesetRuleReconciler) reconcile(ctx context.Context, req ctrl.Request)
 		logger.Info("Wrote rule", "ruleID", state.ruleID, "version", state.version)
 	}
 	if state.moved {
-		logger.Info("Reordered rules", "zoneID", zoneID, "phase", r.kind.phase)
+		logger.Info("Reordered rules", "zoneID", zoneID, "phase", phase)
 	}
 
 	obj.GetRulesetRuleStatus().CloudflareMetadata = cloudflarev1alpha1.RulesetRuleCloudflareMetadata{
@@ -181,15 +195,16 @@ func (r *rulesetRuleReconciler) reconcile(ctx context.Context, req ctrl.Request)
 	return ctrl.Result{}, nil
 }
 
-// peers lists the rules kflare manages in zoneID and the kind's phase: those
-// of every kind writing to the phase, in every namespace, since Zones in
-// different namespaces can point at the same Cloudflare zone. Resources being
-// deleted are left out: their rules are about to go.
-func (r *rulesetRuleReconciler) peers(ctx context.Context, zoneID string) ([]rulesetRulePeer, error) {
+// peers lists the rules kflare manages in zoneID and phase: those of every
+// kind writing to the phase, in every namespace, since Zones in different
+// namespaces can point at the same Cloudflare zone. Resources being deleted
+// are left out: their rules are about to go.
+func (r *rulesetRuleReconciler) peers(ctx context.Context, zoneID string, phase rulesets.Phase) ([]rulesetRulePeer,
+	error) {
 	var peers []rulesetRulePeer
 	zoneIDs := map[types.NamespacedName]string{}
 	for _, kind := range rulesetRuleKinds {
-		if kind.phase != r.kind.phase {
+		if !slices.Contains(kind.phases, phase) {
 			continue
 		}
 		list := kind.newList()
@@ -205,7 +220,7 @@ func (r *rulesetRuleReconciler) peers(ctx context.Context, zoneID string) ([]rul
 			if !ok {
 				return nil, fmt.Errorf("unexpected %T in a %s list", item, kind.name)
 			}
-			if !obj.GetDeletionTimestamp().IsZero() {
+			if !obj.GetDeletionTimestamp().IsZero() || kind.phase(obj) != phase {
 				continue
 			}
 			spec := obj.GetRulesetRuleSpec()
@@ -291,15 +306,15 @@ func (r *rulesetRuleReconciler) deleteCloudflareRule(ctx context.Context, obj ru
 	}
 	// In a phase whose emptied entry point kflare deletes, it stays while
 	// another resource is about to write its rule there.
-	peersRemain := false
-	if emptiedEntrypointPhases[r.kind.phase] {
-		peers, err := r.peers(ctx, zoneID)
+	phase, peersRemain := r.kind.phase(obj), false
+	if emptiedEntrypointPhases[phase] {
+		peers, err := r.peers(ctx, zoneID, phase)
 		if err != nil {
 			return err
 		}
 		peersRemain = len(peers) > 0
 	}
-	return deleteRulesetRule(ctx, cfAPI, zoneID, r.kind.phase,
+	return deleteRulesetRule(ctx, cfAPI, zoneID, phase,
 		rulesetRuleRef(r.kind.name, obj.GetNamespace(), obj.GetName()), peersRemain)
 }
 
@@ -314,15 +329,30 @@ func (r *rulesetRuleReconciler) setup(mgr ctrl.Manager, rec reconcile.Reconciler
 		For(r.kind.newObject()).
 		Watches(&cloudflarev1alpha1.Zone{}, handler.EnqueueRequestsFromMapFunc(r.rulesForZone)).
 		Watches(&cloudflarev1alpha1.IPList{}, handler.EnqueueRequestsFromMapFunc(r.rulesUsingList))
-	if emptiedEntrypointPhases[r.kind.phase] {
+	for _, kind := range r.kind.deletionsWatched() {
+		b = b.Watches(kind.newObject(), handler.EnqueueRequestsFromMapFunc(r.rulesInZoneOfDeleted),
+			builder.WithPredicates(deletesOnly))
+	}
+	return b.Complete(rec)
+}
+
+// deletionsWatched returns the rule kinds whose deletions the kind's
+// controller watches: in each of its phases whose emptied entry point kflare
+// deletes, every kind writing to the phase, each once.
+func (k rulesetRuleKind) deletionsWatched() []rulesetRuleKind {
+	var kinds []rulesetRuleKind
+	for _, phase := range k.phases {
+		if !emptiedEntrypointPhases[phase] {
+			continue
+		}
 		for _, kind := range rulesetRuleKinds {
-			if kind.phase == r.kind.phase {
-				b = b.Watches(kind.newObject(), handler.EnqueueRequestsFromMapFunc(r.rulesInZoneOfDeleted),
-					builder.WithPredicates(deletesOnly))
+			watched := slices.ContainsFunc(kinds, func(w rulesetRuleKind) bool { return w.name == kind.name })
+			if slices.Contains(kind.phases, phase) && !watched {
+				kinds = append(kinds, kind)
 			}
 		}
 	}
-	return b.Complete(rec)
+	return kinds
 }
 
 // rulesInZoneOfDeleted maps the deletion of a rule resource in a phase whose

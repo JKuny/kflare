@@ -64,11 +64,13 @@ type printColumn struct {
 }
 
 // typeString is a string, both as a Go type and as a print column's type;
-// typeInt64 and typeBool are the Go types of an integer and a bool.
+// typeInt64 and typeBool are the Go types of an integer and a bool, and
+// typeInteger an integer's type in the OpenAPI spec and in a print column.
 const (
-	typeString = "string"
-	typeInt64  = "int64"
-	typeBool   = "bool"
+	typeString  = "string"
+	typeInt64   = "int64"
+	typeBool    = "bool"
+	typeInteger = "integer"
 )
 
 // markers returns a field's kubebuilder markers.
@@ -477,8 +479,8 @@ func goTypeOf(f sdkField, specType string) (goType, column string, err error) {
 			return typeBool, "boolean", nil
 		case types.Float64, types.Int64, types.Int:
 			switch specType {
-			case "integer":
-				return typeInt64, "integer", nil
+			case typeInteger:
+				return typeInt64, typeInteger, nil
 			case "number":
 				return "", "", fmt.Errorf("%s is a number that need not be whole, which a CRD cannot hold well; "+
 					"ignore it with a reason", f.apiName)

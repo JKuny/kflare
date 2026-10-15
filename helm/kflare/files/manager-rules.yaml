@@ -30,6 +30,7 @@
   - managedrulesets
   - r2buckets
   - ratelimitrules
+  - transformrules
   - tunnelconfigurations
   - tunnels
   - wafcustomrules
@@ -55,6 +56,7 @@
   - managedrulesets/finalizers
   - r2buckets/finalizers
   - ratelimitrules/finalizers
+  - transformrules/finalizers
   - tunnelconfigurations/finalizers
   - tunnels/finalizers
   - wafcustomrules/finalizers
@@ -74,6 +76,7 @@
   - managedrulesets/status
   - r2buckets/status
   - ratelimitrules/status
+  - transformrules/status
   - tunnelconfigurations/status
   - tunnels/status
   - wafcustomrules/status

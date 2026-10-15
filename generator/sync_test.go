@@ -55,7 +55,8 @@ func decodeSpec(t *testing.T, data string) map[string]any {
 
 func TestSpecSubset(t *testing.T) {
 	subset, err := specSubset(decodeSpec(t, fullSpec),
-		[]route{{verb: "post", path: "/accounts/{id}/things"}, {verb: "post", path: "/accounts/{id}/things"}}, "the source")
+		[]route{{verb: "post", path: "/accounts/{id}/things"}, {verb: "post", path: "/accounts/{id}/things"}}, nil,
+		"the source")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +108,7 @@ func TestSpecSubsetRefuses(t *testing.T) {
 		"a $ref in a list": {`{"paths": {"/x": {"get": [{"$ref": 5}]}}}`, "does not point into",
 			route{verb: "get", path: "/x"}},
 	} {
-		if _, err := specSubset(decodeSpec(t, tc.spec), []route{tc.r}, ""); err == nil ||
+		if _, err := specSubset(decodeSpec(t, tc.spec), []route{tc.r}, nil, ""); err == nil ||
 			!strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want one containing %q", name, err, tc.want)
 		}
@@ -190,5 +191,19 @@ func TestCommands(t *testing.T) {
 	var list stringList
 	if err := list.Set("a"); err != nil || list.Set("b") != nil || list.String() != "a,b" {
 		t.Errorf("stringList = %q", list.String())
+	}
+}
+
+func TestSpecSubsetCopiesSchemas(t *testing.T) {
+	subset, err := specSubset(decodeSpec(t, fullSpec), nil, []string{"thing"}, "the source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemas := subset["components"].(map[string]any)["schemas"].(map[string]any)
+	if !slices.Equal(slices.Sorted(maps.Keys(schemas)), []string{"a/name", "thing"}) {
+		t.Errorf("schemas = %v, want thing and what it reaches", slices.Sorted(maps.Keys(schemas)))
+	}
+	if _, err := specSubset(decodeSpec(t, fullSpec), nil, []string{"Missing"}, ""); err == nil {
+		t.Error("a schema the spec lacks: err = nil")
 	}
 }

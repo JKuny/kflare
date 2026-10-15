@@ -7,6 +7,7 @@ SPDX-License-Identifier: MIT
 package main
 
 import (
+	"encoding/json"
 	"maps"
 	"slices"
 	"strings"
@@ -242,5 +243,56 @@ func TestPageSize(t *testing.T) {
 	}
 	if _, err := spec.pageSize(route{verb: "get", path: "/elsewhere"}); err == nil {
 		t.Error("the page size of an operation the spec lacks: err = nil")
+	}
+}
+
+func TestValueSchema(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw string
+		want      bool
+	}{{"absent", "", false}, {"a bool", "true", false}, {"a schema", `{"type":"string"}`, true}} {
+		got, err := (&schema{AdditionalProperties: json.RawMessage(tc.raw)}).valueSchema()
+		if err != nil || (got != nil) != tc.want {
+			t.Errorf("%s: valueSchema = %v, %v", tc.name, got, err)
+		}
+	}
+	if _, err := (&schema{AdditionalProperties: json.RawMessage(`{"type": 1}`)}).valueSchema(); err == nil {
+		t.Error("a schema that does not decode: err = nil")
+	}
+}
+
+func TestRequiredAndAlternatives(t *testing.T) {
+	spec, err := parseSpec([]byte(`{"components": {"schemas": {
+		"a": {"required": ["x"], "allOf": [{"$ref": "#/components/schemas/b"}]},
+		"b": {"required": ["y"]},
+		"union": {"allOf": [{"anyOf": [{"required": ["x"]}, {"$ref": "#/components/schemas/b"}]}, {"type": "object"}]},
+		"both": {"oneOf": [{}], "anyOf": [{}]},
+		"two": {"allOf": [{"oneOf": [{}]}, {"anyOf": [{}]}]},
+		"broken": {"allOf": [{"$ref": "#/components/schemas/missing"}]}
+	}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := func(name string) *schema { return &schema{Ref: "#/components/schemas/" + name} }
+	required, err := spec.required(ref("a"))
+	if err != nil || !required["x"] || !required["y"] || len(required) != 2 {
+		t.Errorf("required = %v, %v", required, err)
+	}
+	if _, err := spec.required(ref("broken")); err == nil {
+		t.Error("required through a missing $ref: err = nil")
+	}
+	union, _ := spec.resolve(ref("union"))
+	combinator, alternatives, err := spec.alternatives(union)
+	if err != nil || combinator != "anyOf" || len(alternatives) != 2 || alternatives[1].Required[0] != "y" {
+		t.Errorf("alternatives = %s, %v, %v", combinator, alternatives, err)
+	}
+	if combinator, _, err := spec.alternatives(nil); err != nil || combinator != "" {
+		t.Errorf("alternatives of nothing = %s, %v", combinator, err)
+	}
+	for _, name := range []string{"both", "two", "broken"} {
+		s, _ := spec.resolve(ref(name))
+		if _, _, err := spec.alternatives(s); err == nil {
+			t.Errorf("%s: err = nil", name)
+		}
 	}
 }

@@ -57,7 +57,7 @@ const managedRulesetConflictCode = 20014
 // example when a ManagedRuleset is replaced by one with another name.
 var managedRulesetKind = rulesetRuleKind{
 	name:      "ManagedRuleset",
-	phase:     rulesets.PhaseHTTPRequestFirewallManaged,
+	phases:    []rulesets.Phase{rulesets.PhaseHTTPRequestFirewallManaged},
 	newObject: func() rulesetRuleObject { return &cloudflarev1alpha1.ManagedRuleset{} },
 	newList:   func() client.ObjectList { return &cloudflarev1alpha1.ManagedRulesetList{} },
 	definition: func(obj rulesetRuleObject) rulesets.RulesetNewParamsRule {
