@@ -1,7 +1,9 @@
 # The kinds kflare-gen generates, one entry each; `make codegen` writes their API types to
 # api/v1alpha1/zz_generated.<kind>_types.go. Every field of a kind's cloudflare-go v7 service (the params of New and
 # the object Get returns) becomes a field of the kind unless the entry ignores it, with the reason. Field names are the
-# API's, as in the SDK's json, path and query tags. See CLAUDE.md, "Code generator (kflare-gen)".
+# API's, as in the SDK's json, path and query tags. Lengths, patterns, ranges, defaults and integers come from the
+# OpenAPI subset in generator/openapi; an entry that replaces a field's validation says why. See CLAUDE.md, "Code
+# generator (kflare-gen)".
 kinds:
   - kind: KVNamespace
     service: kv.NamespaceService
@@ -26,9 +28,12 @@ kinds:
           account. Changing it renames the namespace in place; its ID and data
           are kept.
         printColumn: Title
-        # The bounds of the hand-written CRD, until feat/generator-openapi reads them from the OpenAPI spec.
-        minLength: 1
-        maxLength: 512
+        validation:
+          minLength: 1
+          maxLength: 512
+          reason: >-
+            The spec gives no minimum, and Cloudflare refuses an empty title (10019, "title is required"; verified live
+            2026-10-14).
     ignore:
       jurisdiction: Not sent by the controller, and restricting a namespace to a jurisdiction is not verified live yet.
       supports_url_encoding: Not observed by the controller yet.

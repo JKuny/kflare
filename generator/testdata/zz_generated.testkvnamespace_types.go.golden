@@ -23,6 +23,7 @@ type TestKVNamespaceSpec struct {
 	AccountRef corev1.LocalObjectReference `json:"accountRef"`
 
 	// Human-readable string name for a Workers KV namespace.
+	// +kubebuilder:validation:MaxLength=512
 	Title string `json:"title"`
 
 	// Specify the jurisdiction to restrict the KV namespace to durably store data

@@ -28,6 +28,8 @@ type TestListSpec struct {
 	Kind string `json:"kind"`
 
 	// An informative name for the list. Use this name in filter and rule expressions.
+	// +kubebuilder:validation:MaxLength=50
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9_]+$`
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="name is immutable"
 	Name string `json:"name"`
 

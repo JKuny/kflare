@@ -136,3 +136,32 @@ func TestCallRefusesWhatIsNotACall(t *testing.T) {
 		t.Errorf("fieldDocs(NoSuchType) = %v", docs)
 	}
 }
+
+func TestServiceReadsRoutes(t *testing.T) {
+	kv := loadTestService(t, "kv.NamespaceService")
+	for name, got := range map[string]route{"New": kv.newRoute, "Get": kv.getRoute, "Update": kv.updateRoute} {
+		want := map[string]string{
+			"New":    "post /accounts/{account_id}/storage/kv/namespaces",
+			"Get":    "get /accounts/{account_id}/storage/kv/namespaces/{namespace_id}",
+			"Update": "put /accounts/{account_id}/storage/kv/namespaces/{namespace_id}",
+		}[name]
+		if got.String() != want {
+			t.Errorf("%s's route = %s, want %s", name, got, want)
+		}
+	}
+	r2 := loadTestService(t, "r2.BucketService")
+	if got := r2.updateRoute.String(); got != "patch /accounts/{account_id}/r2/buckets/{bucket_name}" {
+		t.Errorf("R2's Edit route = %s", got)
+	}
+}
+
+func TestParseRoutes(t *testing.T) {
+	apiMD := `- <code title="post /accounts/{account_id}/things">client.Things.<a href="https://pkg.go.dev/` + sdkModule +
+		`/things#ThingService.New">New</a>(ctx)</code>
+- <code title="get /zones/{zone_id}/other">client.Other.<a href="https://pkg.go.dev/` + sdkModule +
+		`/other#OtherService.Get">Get</a>(ctx)</code>`
+	got := parseRoutes(apiMD, sdkModule+"/things")
+	if len(got) != 1 || got["ThingService.New"] != (route{verb: "post", path: "/accounts/{account_id}/things"}) {
+		t.Errorf("parseRoutes = %v, want only the package's own call", got)
+	}
+}

@@ -13,7 +13,10 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"os"
+	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
@@ -44,7 +47,19 @@ type service struct {
 	// Edit's), and object those of what Get returns. update is nil for a
 	// service that cannot change an object.
 	create, update, object []sdkField
+	// newRoute, getRoute and updateRoute are the routes of those calls, which
+	// find their operations in the OpenAPI spec. updateRoute is empty when
+	// update is nil.
+	newRoute, getRoute, updateRoute route
 }
+
+// route is the HTTP verb and path of an SDK call, as its package's api.md
+// documents them: post /accounts/{account_id}/storage/kv/namespaces.
+type route struct {
+	verb, path string
+}
+
+func (r route) String() string { return r.verb + " " + r.path }
 
 // sdkField is one field of a params struct or of an object.
 type sdkField struct {
@@ -81,7 +96,7 @@ func (s sdk) service(name string) (*service, error) {
 	}
 	path, typeName := sdkModule+"/"+name[:dot], name[dot+1:]
 	pkgs, err := packages.Load(&packages.Config{
-		Mode: packages.NeedName | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo,
+		Mode: packages.NeedName | packages.NeedFiles | packages.NeedTypes | packages.NeedSyntax | packages.NeedTypesInfo,
 		Dir:  s.dir,
 	}, path)
 	if err != nil {
@@ -99,25 +114,80 @@ func (s sdk) service(name string) (*service, error) {
 		return nil, fmt.Errorf("%s has no type %s", path, typeName)
 	}
 
+	routes, err := readRoutes(pkg)
+	if err != nil {
+		return nil, err
+	}
+	routeOf := func(method string) (route, error) {
+		r, ok := routes[typeName+"."+method]
+		if !ok {
+			return route{}, fmt.Errorf("%s's api.md has no route for %s.%s", path, typeName, method)
+		}
+		return r, nil
+	}
+
 	r := newSDKReader(pkg)
 	methods := types.NewMethodSet(types.NewPointer(typ.Type()))
 	svc := &service{name: name}
 	if svc.create, _, err = r.call(methods, "New"); err != nil {
 		return nil, err
 	}
+	if svc.newRoute, err = routeOf("New"); err != nil {
+		return nil, err
+	}
 	if _, svc.object, err = r.call(methods, "Get"); err != nil {
+		return nil, err
+	}
+	if svc.getRoute, err = routeOf("Get"); err != nil {
 		return nil, err
 	}
 	for _, method := range []string{"Update", "Edit"} {
 		svc.update, _, err = r.call(methods, method)
-		if !errors.Is(err, errNoMethod) {
-			break
+		if errors.Is(err, errNoMethod) {
+			continue
 		}
-	}
-	if err != nil && !errors.Is(err, errNoMethod) {
-		return nil, err
+		if err != nil {
+			return nil, err
+		}
+		if svc.updateRoute, err = routeOf(method); err != nil {
+			return nil, err
+		}
+		break
 	}
 	return svc, nil
+}
+
+// apiMDCall matches a call in a cloudflare-go v7 api.md: its route, then the
+// link to its method, as in
+//
+//	<code title="post /accounts/{account_id}/storage/kv/namespaces">client.KV.Namespaces.<a
+//	href="https://pkg.go.dev/github.com/cloudflare/cloudflare-go/v7/kv#NamespaceService.New">New</a>
+var apiMDCall = regexp.MustCompile(`<code title="([a-z]+) ([^"]+)">[^<]*<a href="https://pkg\.go\.dev/` +
+	regexp.QuoteMeta(sdkModule) + `/([^"#]+)#(\w+)\.(\w+)">`)
+
+// readRoutes returns the routes of the calls in a package's api.md, by
+// <type>.<method>.
+func readRoutes(pkg *packages.Package) (map[string]route, error) {
+	if len(pkg.GoFiles) == 0 {
+		return nil, fmt.Errorf("%s has no Go files", pkg.PkgPath)
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(pkg.GoFiles[0]), "api.md"))
+	if err != nil {
+		return nil, err
+	}
+	return parseRoutes(string(data), pkg.PkgPath), nil
+}
+
+// parseRoutes reads the routes of an api.md's calls that are methods of the
+// package pkgPath.
+func parseRoutes(apiMD, pkgPath string) map[string]route {
+	routes := map[string]route{}
+	for _, m := range apiMDCall.FindAllStringSubmatch(apiMD, -1) {
+		if sdkModule+"/"+m[3] == pkgPath {
+			routes[m[4]+"."+m[5]] = route{verb: m[1], path: m[2]}
+		}
+	}
+	return routes
 }
 
 // errNoMethod is the error for a service without the method asked for.
