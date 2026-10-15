@@ -23,6 +23,7 @@
   - kflare.dev
   resources:
   - cloudflareaccounts
+  - d1databases
   - dnsrecords
   - iplists
   - kvnamespaces
@@ -47,6 +48,7 @@
   - kflare.dev
   resources:
   - cloudflareaccounts/finalizers
+  - d1databases/finalizers
   - dnsrecords/finalizers
   - iplists/finalizers
   - kvnamespaces/finalizers
@@ -65,6 +67,7 @@
   - kflare.dev
   resources:
   - cloudflareaccounts/status
+  - d1databases/status
   - dnsrecords/status
   - iplists/status
   - kvnamespaces/status

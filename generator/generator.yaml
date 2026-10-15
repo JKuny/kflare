@@ -47,3 +47,46 @@ kinds:
     ignore:
       jurisdiction: Not sent by the controller, and restricting a namespace to a jurisdiction is not verified live yet.
       supports_url_encoding: Not observed by the controller yet.
+
+  - kind: D1Database
+    service: d1.DatabaseService
+    scope: account
+    shortName: cfd1
+    noun: D1 database
+    doc: |
+      D1Database is the Schema for the d1databases API.
+      It represents a Cloudflare D1 database. Deleting it deletes the
+      database and all of its data, unless the retain deletion policy is set.
+    id:
+      field: uuid
+      status: databaseID
+      doc: |
+        DatabaseID is the D1 database's identifier, which a Worker's D1
+        binding names.
+    claimLabel: kflare.dev/d1-database-id
+    adopt:
+      by: name
+    sample:
+      name: example-db
+    fields:
+      name:
+        doc: |
+          Name is the database's name in Cloudflare, unique within the
+          account. It cannot change.
+        printColumn: Name
+      primary_location_hint:
+        doc: |
+          PrimaryLocationHint asks Cloudflare to create the database's primary
+          in this region, if it is available there; without it, Cloudflare
+          picks a region close to kflare's manager. Cloudflare does not report
+          it back, so it takes effect only when kflare creates the database.
+      version:
+        doc: |
+          Version is the D1 backend the database runs on, such as production.
+    ignore:
+      read_replication: >-
+        A nested object, which kflare-gen cannot map yet. A new database has read replication disabled (verified live
+        2026-10-15).
+      created_at: A time, which kflare-gen cannot map yet.
+      file_size: A number in the OpenAPI spec, not an integer.
+      num_tables: Deprecated in cloudflare-go v7, which says the count is no longer accurate.

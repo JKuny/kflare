@@ -28,6 +28,7 @@ rules:
   - kflare.dev
   resources:
   - cloudflareaccounts
+  - d1databases
   - dnsrecords
   - iplists
   - kvnamespaces
@@ -52,6 +53,7 @@ rules:
   - kflare.dev
   resources:
   - cloudflareaccounts/finalizers
+  - d1databases/finalizers
   - dnsrecords/finalizers
   - iplists/finalizers
   - kvnamespaces/finalizers
@@ -70,6 +72,7 @@ rules:
   - kflare.dev
   resources:
   - cloudflareaccounts/status
+  - d1databases/status
   - dnsrecords/status
   - iplists/status
   - kvnamespaces/status

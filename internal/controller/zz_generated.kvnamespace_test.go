@@ -45,7 +45,10 @@ func (f fakeKVNamespaceAPI) Get(_ context.Context, id string, params kv.Namespac
 
 func (f fakeKVNamespaceAPI) List(_ context.Context, params kv.NamespaceListParams,
 	_ ...option.RequestOption) (*pagination.V4PagePaginationArray[kv.Namespace], error) {
-	return f.list(params.AccountID.Value, int64(params.Page.Value), int64(params.PerPage.Value))
+	return fakeList(f.fakeCRUDStore, params.AccountID.Value, int64(params.Page.Value), int64(params.PerPage.Value),
+		func(current *kv.Namespace) kv.Namespace {
+			return *current
+		})
 }
 
 func (f fakeKVNamespaceAPI) Update(_ context.Context, id string, params kv.NamespaceUpdateParams,
@@ -65,11 +68,12 @@ func (f fakeKVNamespaceAPI) Delete(_ context.Context, id string, params kv.Names
 	return new(kv.NamespaceDeleteResponse), nil
 }
 
-var _ = describeCRUDKind(crudKindSpecs[*cloudflarev1alpha1.KVNamespace, KVNamespaceAPI, kv.Namespace]{
+var _ = describeCRUDKind(crudKindSpecs[*cloudflarev1alpha1.KVNamespace, KVNamespaceAPI, kv.Namespace, kv.Namespace]{
 	kind:     kvNamespaceKind,
 	keyField: "title",
 	pageSize: kvNamespaceListPageSize,
-	newReconciler: func(c client.Client, newAPI func(string) (KVNamespaceAPI, error)) crudKindReconciler[*cloudflarev1alpha1.KVNamespace, KVNamespaceAPI, kv.Namespace] {
+	newReconciler: func(c client.Client,
+		newAPI func(string) (KVNamespaceAPI, error)) crudKindReconciler[*cloudflarev1alpha1.KVNamespace, KVNamespaceAPI, kv.Namespace, kv.Namespace] {
 		return &KVNamespaceReconciler{Client: c, Scheme: c.Scheme(), NewKVNamespaceAPI: newAPI}
 	},
 	newFake:    func(store *fakeCRUDStore[kv.Namespace]) KVNamespaceAPI { return fakeKVNamespaceAPI{store} },

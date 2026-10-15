@@ -181,7 +181,7 @@ func emitController(c *controller, header string) ([]byte, error) {
 	svcPkg := f.use(c.svc.pkg.Path(), c.svc.pkg.Name())
 	service := svcPkg + "." + c.svc.typeName
 	obj := "*" + f.api() + "." + name
-	object := f.typ(c.object)
+	object, listed := f.typ(c.object), f.typ(c.listed)
 	ctx := f.use("context", "context")
 	client := f.use(clientPackage, "client")
 
@@ -211,7 +211,7 @@ func emitController(c *controller, header string) ([]byte, error) {
 	f.printf("\n")
 
 	comment(&f.Builder, "", wrap(kindDoc(c)))
-	f.printf("var %sKind = crudResourceKind[%s, %s, %s]{\n", v, obj, api, object)
+	f.printf("var %sKind = crudResourceKind[%s, %s, %s, %s]{\n", v, obj, api, object, listed)
 	f.printf("name: %q,\nnoun: %q,\n", name, c.noun)
 	f.printf("newObject: func() %s { return &%s.%s{} },\n", obj, f.api(), name)
 	f.printf("newList: func() %s.ObjectList { return &%s.%sList{} },\n\n", client, f.api(), name)
@@ -231,20 +231,25 @@ func emitController(c *controller, header string) ([]byte, error) {
 	f.printf("},\n\n")
 
 	f.printf("id: func(current *%s) string { return current.%s },\n", object, c.id.goName)
-	key, err := f.convert("current."+c.key.object.goName, c.key.object.typ, types.Typ[types.String])
-	if err != nil {
-		return nil, fmt.Errorf("%s: adopt.by: %w", name, err)
-	}
-	f.printf("objectKey: func(current *%s) string { return %s },\n", object, key)
 	matches, err := matchesExpr(f, c, false)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	if matches == "" {
-		f.printf("matches: func(%s, *%s) bool { return true },\n\n", obj, object)
+		f.printf("matches: func(%s, *%s) bool { return true },\n", obj, object)
 	} else {
-		f.printf("matches: func(obj %s, current *%s) bool {\nreturn %s\n},\n\n", obj, object, matches)
+		f.printf("matches: func(obj %s, current *%s) bool {\nreturn %s\n},\n", obj, object, matches)
 	}
+	listedID, err := f.convert("listed."+c.listedID.goName, c.listedID.typ, types.Typ[types.String])
+	if err != nil {
+		return nil, fmt.Errorf("%s: the listed ID: %w", name, err)
+	}
+	listedKey, err := f.convert("listed."+c.listedKey.goName, c.listedKey.typ, types.Typ[types.String])
+	if err != nil {
+		return nil, fmt.Errorf("%s: adopt.by: %w", name, err)
+	}
+	f.printf("listedID: func(listed *%s) string { return %s },\n", listed, listedID)
+	f.printf("listedKey: func(listed *%s) string { return %s },\n\n", listed, listedKey)
 
 	f.printf("get: func(ctx %s.Context, api %s, accountID, id string) (*%s, error) {\n", ctx, api, object)
 	if err := callBody(f, c, c.get, nil, "return api.Get(ctx, id, params)"); err != nil {
@@ -326,7 +331,7 @@ func emitController(c *controller, header string) ([]byte, error) {
 	f.printf("func (r *%sReconciler) SetupWithManager(mgr %s.Manager) error {\nreturn r.crud().setup(mgr, r)\n}\n\n",
 		name, ctrl)
 
-	crud := fmt.Sprintf("crudResourceReconciler[%s, %s, %s]", obj, api, object)
+	crud := fmt.Sprintf("crudResourceReconciler[%s, %s, %s, %s]", obj, api, object, listed)
 	comment(&f.Builder, "", wrap(fmt.Sprintf("crud returns the shared CRUD reconciler for %s, with the injected "+
 		"factory or the production one.", pluralOf(name))))
 	f.printf("func (r *%sReconciler) crud() *%s {\n", name, crud)
@@ -516,7 +521,7 @@ func emitControllerTest(c *controller, header string) ([]byte, error) {
 	f := newGoFile()
 	name, v := c.name, c.varName
 	api, fake := name+"API", "fake"+name+"API"
-	object := f.typ(c.object)
+	object, listed := f.typ(c.object), f.typ(c.listed)
 	ctx := f.use("context", "context")
 	opts := f.typ(c.create.sig.Params().At(c.create.sig.Params().Len() - 1).Type().(*types.Slice).Elem())
 	obj := "*" + f.api() + "." + name
@@ -543,8 +548,8 @@ func emitControllerTest(c *controller, header string) ([]byte, error) {
 	}
 	f.printf("func (f %s) New(_ %s.Context, params %s,\n_ ...%s) (*%s, error) {\n", fake, ctx, params(c.create), opts,
 		object)
-	f.printf("return f.create(%s, func(id string) %s {\nreturn %s{%s}\n})\n}\n\n", account(c.create), object, object,
-		strings.Join(fields, ", "))
+	f.printf("return f.create(%s, func(id string) %s {\nreturn %s\n})\n}\n\n", account(c.create), object,
+		compositeLiteral(object, fields))
 
 	f.printf("func (f %s) Get(_ %s.Context, id string, params %s,\n_ ...%s) (*%s, error) {\n", fake, ctx,
 		params(c.get), opts, object)
@@ -558,9 +563,14 @@ func emitControllerTest(c *controller, header string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: the fake's List: %w", name, err)
 	}
+	asListed, err := listedObject(f, c)
+	if err != nil {
+		return nil, fmt.Errorf("%s: the fake's List: %w", name, err)
+	}
 	f.printf("func (f %s) List(_ %s.Context, params %s,\n_ ...%s) (%s, error) {\n", fake, ctx, params(c.list), opts,
 		f.typ(c.list.sig.Results().At(0).Type()))
-	f.printf("return f.list(%s, %s, %s)\n}\n\n", account(c.list), page, perPage)
+	f.printf("return fakeList(f.fakeCRUDStore, %s, %s, %s,\nfunc(current *%s) %s {\nreturn %s\n})\n}\n\n",
+		account(c.list), page, perPage, object, listed, asListed)
 
 	if c.update != nil {
 		f.printf("func (f %s) %s(_ %s.Context, id string, params %s,\n_ ...%s) (*%s, error) {\n", fake,
@@ -586,10 +596,10 @@ func emitControllerTest(c *controller, header string) ([]byte, error) {
 
 	client := f.use(clientPackage, "client")
 	k8stypes := f.use("k8s.io/apimachinery/pkg/types", "types")
-	f.printf("var _ = describeCRUDKind(crudKindSpecs[%s, %s, %s]{\n", obj, api, object)
+	f.printf("var _ = describeCRUDKind(crudKindSpecs[%s, %s, %s, %s]{\n", obj, api, object, listed)
 	f.printf("kind: %sKind,\nkeyField: %q,\npageSize: %sListPageSize,\n", v, c.key.jsonName, v)
-	f.printf("newReconciler: func(c %s.Client, newAPI func(string) (%s, error)) crudKindReconciler[%s, %s, %s] {\n",
-		client, api, obj, api, object)
+	f.printf("newReconciler: func(c %s.Client,\nnewAPI func(string) (%s, error)) crudKindReconciler[%s, %s, %s, %s] {\n",
+		client, api, obj, api, object, listed)
 	f.printf("return &%sReconciler{Client: c, Scheme: c.Scheme(), New%s: newAPI}\n},\n", name, api)
 	f.printf("newFake: func(store *fakeCRUDStore[%s]) %s { return %s{store} },\n", object, api, fake)
 	f.printf("defaultAPI: default%s,\nservice: &%s{},\n", api, f.typ(c.svc.pkg.Scope().Lookup(c.svc.typeName).Type()))
@@ -642,6 +652,44 @@ func emitControllerTest(c *controller, header string) ([]byte, error) {
 	edits("invalid", c.invalid)
 	f.printf("})\n")
 	return f.source(header)
+}
+
+// listedObject returns the expression that shows the object current as a
+// page of the list shows it: the object itself when the list holds Get's
+// type, else the fields the two share, by API name. The ID and the adoption
+// key are always among them.
+func listedObject(f *goFile, c *controller) (string, error) {
+	if types.Identical(c.object, c.listed) {
+		return "*current", nil
+	}
+	var fields []string
+	for _, l := range c.svc.listed {
+		i := slices.IndexFunc(c.svc.object, func(o sdkField) bool { return o.apiName == l.apiName })
+		if i < 0 {
+			continue
+		}
+		value, err := f.convert("current."+c.svc.object[i].goName, c.svc.object[i].typ, l.typ)
+		if err != nil {
+			if l.apiName == c.listedID.apiName || l.apiName == c.listedKey.apiName {
+				return "", fmt.Errorf("%s: %w", l.apiName, err)
+			}
+			// A field the fake cannot copy, such as a nested object, stays
+			// empty: the reconciler reads only the ID and the key of a
+			// listed object.
+			continue
+		}
+		fields = append(fields, fmt.Sprintf("%s: %s", l.goName, value))
+	}
+	return compositeLiteral(f.typ(c.listed), fields), nil
+}
+
+// compositeLiteral writes a struct literal of typ, one field to a line when
+// it has more than two.
+func compositeLiteral(typ string, fields []string) string {
+	if len(fields) <= 2 {
+		return typ + "{" + strings.Join(fields, ", ") + "}"
+	}
+	return typ + "{\n" + strings.Join(fields, ",\n") + ",\n}"
 }
 
 // goValue writes a value of the spec field f as Go source: a pointer for a

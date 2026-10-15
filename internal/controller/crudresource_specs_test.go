@@ -107,8 +107,10 @@ func (s *fakeCRUDStore[R]) get(accountID, id string) (*R, error) {
 	return &object, nil
 }
 
-// list returns a page of the objects, in the order of their IDs.
-func (s *fakeCRUDStore[R]) list(accountID string, page, perPage int64) (*pagination.V4PagePaginationArray[R], error) {
+// fakeList returns a page of s's objects, in the order of their IDs, each
+// as listed shows it.
+func fakeList[R any, L any](s *fakeCRUDStore[R], accountID string, page, perPage int64,
+	listed func(*R) L) (*pagination.V4PagePaginationArray[L], error) {
 	if err := s.account(accountID); err != nil {
 		return nil, err
 	}
@@ -123,11 +125,12 @@ func (s *fakeCRUDStore[R]) list(accountID string, page, perPage int64) (*paginat
 	ids := slices.Sorted(maps.Keys(s.objects))
 	start := min(max(page-1, 0)*perPage, int64(len(ids)))
 	end := min(start+perPage, int64(len(ids)))
-	res := &pagination.V4PagePaginationArray[R]{
+	res := &pagination.V4PagePaginationArray[L]{
 		ResultInfo: pagination.V4PagePaginationArrayResultInfo{Page: page, PerPage: perPage},
 	}
 	for _, id := range ids[start:end] {
-		res.Result = append(res.Result, s.objects[id])
+		object := s.objects[id]
+		res.Result = append(res.Result, listed(&object))
 	}
 	return res, nil
 }
@@ -166,10 +169,10 @@ func (s *fakeCRUDStore[R]) delete(accountID, id string) error {
 }
 
 // crudKindReconciler is a generated kind's reconciler.
-type crudKindReconciler[O conditionedObject, A any, R any] interface {
+type crudKindReconciler[O conditionedObject, A any, R any, L any] interface {
 	reconcile.Reconciler
 	SetupWithManager(mgr ctrl.Manager) error
-	crud() *crudResourceReconciler[O, A, R]
+	crud() *crudResourceReconciler[O, A, R, L]
 }
 
 // crudSpecEdit is an edit of a generated kind's sample spec: of field, as
@@ -180,15 +183,15 @@ type crudSpecEdit[O any] struct {
 }
 
 // crudKindSpecs is the table kflare-gen writes for a generated kind.
-type crudKindSpecs[O conditionedObject, A any, R any] struct {
-	kind crudResourceKind[O, A, R]
+type crudKindSpecs[O conditionedObject, A any, R any, L any] struct {
+	kind crudResourceKind[O, A, R, L]
 	// keyField is the spec field a resource adopts an object by, and
 	// pageSize the most objects a page of the list holds.
 	keyField string
 	pageSize int64
 	// newReconciler returns the kind's reconciler, with newAPI as its
 	// factory: nil for the production one.
-	newReconciler func(c client.Client, newAPI func(string) (A, error)) crudKindReconciler[O, A, R]
+	newReconciler func(c client.Client, newAPI func(string) (A, error)) crudKindReconciler[O, A, R, L]
 	// newFake returns the kind's fake service on store.
 	newFake func(store *fakeCRUDStore[R]) A
 	// defaultAPI is the production factory, and service an empty value of
@@ -209,7 +212,7 @@ type crudKindSpecs[O conditionedObject, A any, R any] struct {
 }
 
 // describeCRUDKind runs the shared specs on a generated kind's table.
-func describeCRUDKind[O conditionedObject, A any, R any](t crudKindSpecs[O, A, R]) bool {
+func describeCRUDKind[O conditionedObject, A any, R any, L any](t crudKindSpecs[O, A, R, L]) bool {
 	return Describe(t.kind.name+" (generated specs)", func() {
 		k := t.kind
 		base := "gen-" + strings.ToLower(k.name)
@@ -224,7 +227,7 @@ func describeCRUDKind[O conditionedObject, A any, R any](t crudKindSpecs[O, A, R
 		ctx := context.Background()
 
 		var store *fakeCRUDStore[R]
-		var r crudKindReconciler[O, A, R]
+		var r crudKindReconciler[O, A, R, L]
 
 		createAccount := func(ready bool) {
 			account := &cloudflarev1alpha1.CloudflareAccount{
@@ -337,7 +340,6 @@ func describeCRUDKind[O conditionedObject, A any, R any](t crudKindSpecs[O, A, R
 				object := store.objects[id]
 				Expect(t.created(obj, &object)).To(BeTrue(), "the new object holds every field of the spec")
 				Expect(k.matches(obj, &object)).To(BeTrue(), "the new object is what the spec asks for")
-				Expect(k.objectKey(&object)).To(Equal(k.key(obj)))
 				Expect(obj.GetLabels()).To(HaveKeyWithValue(k.claimLabel, id))
 				Expect(ready().Status).To(Equal(metav1.ConditionTrue))
 			})
@@ -383,6 +385,29 @@ func describeCRUDKind[O conditionedObject, A any, R any](t crudKindSpecs[O, A, R
 				Expect(store.objects).To(HaveLen(int(t.pageSize)+1), "nothing is created")
 				Expect(k.statusID(get())).To(Equal("z-last"))
 				Expect(get().GetLabels()).To(HaveKeyWithValue(k.claimLabel, "z-last"))
+			})
+
+			It("creates the "+k.noun+" when the one it would adopt is gone before it is read", func() {
+				createAccount(true)
+				obj := create(key, nil)
+				store.objects["listed"] = t.seed("listed", k.key(obj))
+				store.getErr = fakeCRUDNotFound(http.MethodGet, accountID, "listed")
+				_, err := reconcileIt()
+				Expect(err).NotTo(HaveOccurred())
+				id := k.statusID(get())
+				Expect(id).NotTo(Equal("listed"))
+				Expect(store.objects).To(HaveKey(id))
+				Expect(ready().Status).To(Equal(metav1.ConditionTrue))
+			})
+
+			It("returns a failed read of the "+k.noun+" it would adopt for back-off", func() {
+				createAccount(true)
+				obj := create(key, nil)
+				store.objects["listed"] = t.seed("listed", k.key(obj))
+				store.getErr = errors.New("unavailable")
+				_, err := reconcileIt()
+				Expect(err).To(MatchError("unavailable"))
+				Expect(store.objects).To(HaveLen(1), "nothing is created")
 			})
 
 			It("reports "+k.conflictReason+" instead of taking over a "+k.noun+" another "+k.name+" manages", func() {

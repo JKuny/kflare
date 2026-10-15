@@ -15,9 +15,6 @@ import (
 	"strings"
 )
 
-// paginationPackage holds cloudflare-go v7's pages of a list.
-const paginationPackage = sdkModule + "/packages/pagination"
-
 // controller is the model of a generated kind's controller, of its envtest
 // table and of its sample: what zz_generated.<kind>.go and
 // zz_generated.<kind>_test.go in internal/controller declare, and what
@@ -31,9 +28,9 @@ type controller struct {
 	// service that cannot change an object.
 	create, get, list, update, remove *sdkCall
 	// object is the type of the Cloudflare object that New, Get and Update
-	// return a pointer to, and deleteResult the type Delete returns a
-	// pointer to.
-	object, deleteResult types.Type
+	// return a pointer to, listed the type of the objects a page of List
+	// holds, and deleteResult the type Delete returns a pointer to.
+	object, listed, deleteResult types.Type
 	// pageSize is the most objects a page of the list holds, and page and
 	// perPage are List's params that ask for a page.
 	pageSize      int64
@@ -46,9 +43,11 @@ type controller struct {
 	// spec field.
 	fixedFields []apiField
 	// id is the object's ID and status the fields that status records, ID
-	// first.
-	id     sdkField
-	status []statusField
+	// first. listedID and listedKey are the ID and the adoption key of the
+	// objects List returns.
+	id                  sdkField
+	status              []statusField
+	listedID, listedKey sdkField
 	// conflictReason is the reason a resource reports when another one
 	// manages the object it would adopt.
 	conflictReason string
@@ -166,9 +165,18 @@ func (b *controllerBuilder) calls(c *controller) error {
 				call.name, typeName(got), typeName(ptr))
 		}
 	}
-	if got := c.list.sig.Results().At(0).Type(); !isPageOf(got, c.object) {
+	got := c.list.sig.Results().At(0).Type()
+	listed, ok := pageElement(got)
+	if !ok {
 		return fmt.Errorf("the service's List returns %s: the shared CRUD reconciler can only page through a "+
-			"pagination.V4PagePaginationArray of Get's object yet", typeName(got))
+			"pagination.V4PagePaginationArray yet", typeName(got))
+	}
+	if svc.listed == nil {
+		return fmt.Errorf("the service's List returns pages of %s, which kflare-gen cannot read", typeName(listed))
+	}
+	c.listed = listed
+	if c.listedID, ok = listedField(svc, b.entry.ID.Field); !ok {
+		return fmt.Errorf("the objects List returns have no %s, the ID", b.entry.ID.Field)
 	}
 	deleted, ok := c.remove.sig.Results().At(0).Type().(*types.Pointer)
 	if !ok {
@@ -231,18 +239,13 @@ func checkShape(call *sdkCall, withID bool) error {
 	return nil
 }
 
-// isPageOf reports whether t is *pagination.V4PagePaginationArray[object].
-func isPageOf(t, object types.Type) bool {
-	ptr, ok := t.(*types.Pointer)
-	if !ok {
-		return false
+// listedField returns the field apiName of the objects List returns.
+func listedField(svc *service, apiName string) (sdkField, bool) {
+	i := slices.IndexFunc(svc.listed, func(f sdkField) bool { return f.apiName == apiName })
+	if i < 0 {
+		return sdkField{}, false
 	}
-	named, ok := ptr.Elem().(*types.Named)
-	if !ok || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != paginationPackage ||
-		named.Obj().Name() != "V4PagePaginationArray" || named.TypeArgs().Len() != 1 {
-		return false
-	}
-	return types.Identical(named.TypeArgs().At(0), object)
+	return svc.listed[i], true
 }
 
 // fields pairs each spec field and fixed value with the params that set it
@@ -274,6 +277,11 @@ func (b *controllerBuilder) fields(c *controller) error {
 	}
 	for _, name := range slices.Sorted(maps.Keys(c.fixed)) {
 		c.fixedFields = append(c.fixedFields, pair(apiField{field: field{apiName: name}, fixed: c.fixed[name]}))
+	}
+	// An Update that takes nothing kflare sends is never called: a D1
+	// database's takes only its read replication.
+	if !slices.ContainsFunc(slices.Concat(c.fields, c.fixedFields), func(af apiField) bool { return af.update != nil }) {
+		c.update, update = nil, nil
 	}
 	// Update may take a param kflare does not send only when it is optional.
 	for _, f := range update {
@@ -316,6 +324,10 @@ func (b *controllerBuilder) adoption(c *controller) error {
 		return fmt.Errorf("adopt.by: %s is not a required string", by)
 	case c.fields[i].object == nil:
 		return fmt.Errorf("adopt.by: Get's object does not report %s", by)
+	}
+	var ok bool
+	if c.listedKey, ok = listedField(b.svc, by); !ok {
+		return fmt.Errorf("adopt.by: the objects List returns do not report %s", by)
 	}
 	c.key = c.fields[i]
 	c.conflictReason = c.key.goName + "Conflict"

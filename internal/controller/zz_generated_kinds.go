@@ -20,6 +20,9 @@ import (
 // SetupGeneratedReconcilers registers the reconciler of every kind kflare-gen
 // generates with mgr.
 func SetupGeneratedReconcilers(mgr ctrl.Manager) error {
+	if err := (&D1DatabaseReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setting up the D1Database controller: %w", err)
+	}
 	if err := (&KVNamespaceReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setting up the KVNamespace controller: %w", err)
 	}
@@ -29,6 +32,8 @@ func SetupGeneratedReconcilers(mgr ctrl.Manager) error {
 // generatedAccountDependents are the generated kinds, whose resources use a
 // CloudflareAccount's credentials directly.
 var generatedAccountDependents = []dependentKind{
+	dependents("D1Database", func() client.ObjectList { return &cloudflarev1alpha1.D1DatabaseList{} },
+		func(obj *cloudflarev1alpha1.D1Database) []string { return []string{obj.Spec.AccountRef.Name} }),
 	dependents("KVNamespace", func() client.ObjectList { return &cloudflarev1alpha1.KVNamespaceList{} },
 		func(obj *cloudflarev1alpha1.KVNamespace) []string { return []string{obj.Spec.AccountRef.Name} }),
 }

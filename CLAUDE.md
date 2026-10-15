@@ -108,7 +108,7 @@ Planned, not yet present: the Docusaurus site under `docs/` (Phase 4).
   - Sets `Ready` condition and `accountName` in status
   - Tested live against real Cloudflare account ✅
   - Watches its token Secret; deletion protection keeps the account (finalizer, `Ready=False InUse`) while a
-    Zone, Tunnel, WorkerScript, KVNamespace, R2Bucket or IPList references it, and the token Secret
+    Zone, Tunnel, WorkerScript, KVNamespace, R2Bucket, IPList or D1Database references it, and the token Secret
     (`kflare.dev/token-protection`, recorded in `status.protectedTokenSecret`) while an account references it — see
     `cloudflareaccount_protection.go`
 - [x] Makefile targets: `generate`, `manifests`, `build`, `run`, `test` (kubebuilder-generated)
@@ -175,7 +175,8 @@ Shared infrastructure that all Phase 2 controllers will use.
   - Deployment smoke test: builds the image, deploys `config/default` to kind, checks the manager pod is
     ready with no restarts
   - Live Cloudflare specs (`test/e2e/cloudflare_test.go`, skipped without credentials): account validation, Tunnel +
-    token Secret, TunnelConfiguration, KVNamespace (renamed in place), R2Bucket, WorkerScript (bound to both), and an
+    token Secret, TunnelConfiguration, KVNamespace (renamed in place), R2Bucket, a D1Database (created in the EU
+    jurisdiction, deleted with the retain policy, then adopted by name), WorkerScript (bound to KV and R2), and an
     IPList (items replaced in place; an idle reconcile leaves the list alone). With `CF_E2E_ZONE` also Zone adoption
     (always `retain`), a DNSRecord (including a check that an idle reconcile does not write to Cloudflare), a
     WorkerRoute plus exclusion route, two WAFCustomRules (a skip rule placed before a block rule by priority; an idle
@@ -465,7 +466,8 @@ shared machinery once; each rule CRD on top of it is mostly types plus a convers
 | `feat/ip-list-controller` | `IPList` | shared-client | ✅ Free: 1 IP list, 10,000 items |
 | `feat/zero-trust-controllers` | `AccessGroup`, `AccessPolicy`, `AccessApplication` | shared-client | Blocked: Zero Trust is not enabled on the account (a free plan exists) |
 | `feat/managed-ruleset-controller` | `ManagedRuleset` (was `WAFPackage`) | rulesets-foundation | ✅ By hand (decided 2026-10-13). Free: only the Cloudflare Free Managed Ruleset, with overrides |
-| Code generator: `feat/cloudflare-go-v7` … `feat/generator-rule-kinds` (8 PRs) | none: `kflare-gen` and the shared CRUD reconciler; KVNamespace moves onto them; the first new generated kind (see [Code generator](#code-generator-kflare-gen)) | — | 🚧 5 of 8 done (`feat/cloudflare-go-v7` … `feat/generator-controllers`); decided 2026-10-13 |
+| Code generator: `feat/cloudflare-go-v7` … `feat/generator-rule-kinds` (8 PRs) | none: `kflare-gen` and the shared CRUD reconciler; KVNamespace moves onto them; the first new generated kind (see [Code generator](#code-generator-kflare-gen)) | — | 🚧 6 of 8 done (`feat/cloudflare-go-v7` … `feat/d1-database-controller`); decided 2026-10-13 |
+| `feat/d1-database-controller` | `D1Database` | code generator (PR 6) | ✅ Generated end to end. Free: 10 databases, 500 MB each, 5 GB in total |
 | `feat/managed-transform-controller` | `ManagedTransform` | zone-controller | Free: all six transforms |
 | `feat/transform-rule-controller` | `TransformRule` | code generator (rule kinds) | Generated. Free: 10 rules, no regex |
 | `feat/redirect-rule-controller` | `RedirectRule` | code generator (rule kinds) | Generated. Free: 10 rules, no regex |
@@ -512,6 +514,7 @@ permission group names; deploy.md uses the dashboard's labels, so look those up 
 | `OriginRule` | Origin Write | ❌ 403 |
 | `ManagedTransform` | Managed headers Write | ❌ Read only (not a Rulesets endpoint, so no dry run) |
 | `IPList` | Account Rule Lists Write (account) | ✅ create, replace and delete verified 2026-10-13; enough on its own |
+| `D1Database` | D1 Write (account) | ✅ create, read, list and delete verified 2026-10-15; not yet checked on its own |
 | `AccessGroup`, `AccessPolicy`, `AccessApplication` | Access: Organizations, Identity Providers, and Groups Write; Access: Apps and Policies Write (account) | ✅, but Access is not enabled |
 
 - Adding a permission to the dev token needs the user's OK first, as with Workers Routes Write on 2026-10-05
@@ -621,7 +624,7 @@ Last checked 2026-10-07; the Free-plan limits and Zero Trust again on 2026-10-09
 
 | Item | Paid option | Current workaround | When we come back to it |
 |------|-------------|--------------------|-------------------------|
-| Ownership marker on the Cloudflare side (DNSRecord, and in general) | DNS record tags (Pro plan and up) | `kflare.dev/record-id` / `route-id` / `kv-namespace-id` / `r2-bucket-name` / `ip-list-id` labels in the cluster; ARCHITECTURE.md lists "no ownership marker on the Cloudflare side" as a known limitation | With a Pro zone, tag records kflare creates; or a TXT ownership registry like external-dns (works on Free) |
+| Ownership marker on the Cloudflare side (DNSRecord, and in general) | DNS record tags (Pro plan and up) | `kflare.dev/record-id` / `route-id` / `kv-namespace-id` / `d1-database-id` / `r2-bucket-name` / `ip-list-id` labels in the cluster; ARCHITECTURE.md lists "no ownership marker on the Cloudflare side" as a known limitation | With a Pro zone, tag records kflare creates; or a TXT ownership registry like external-dns (works on Free) |
 
 **Free, but needs account setup first:**
 
@@ -1060,9 +1063,9 @@ Each is the foundation plus typed action parameters. Together they replace Page 
 
 #### Code generator (`kflare-gen`)
 **Depends on:** `feat/shared-client`, `feat/rulesets-foundation`; eight PRs, in order
-**Status:** 🚧 In progress: PRs 1 to 5 (`feat/cloudflare-go-v7`, `feat/crud-reconciler`, `feat/generator-types`,
-`feat/generator-openapi`, `feat/generator-controllers`) ✅, next PR 6 (the first new generated kind). Planned and decided
-2026-10-13
+**Status:** 🚧 In progress: PRs 1 to 6 (`feat/cloudflare-go-v7`, `feat/crud-reconciler`, `feat/generator-types`,
+`feat/generator-openapi`, `feat/generator-controllers`, `feat/d1-database-controller`) ✅, next PR 7
+(`feat/rulesets-v7`). Planned and decided 2026-10-13
 
 Most of a new kind is the same wiring every time. IPList (#26) changed 27 files (+2,596 lines). Besides its types and
 its bulk-operation logic, it repeated `Get/SetConditions`, registration in `cmd/main.go`, the CRD kustomization, the
@@ -1078,7 +1081,8 @@ part from Cloudflare's own description of its API. What Cloudflare does not desc
    output is committed, so each field an SDK bump adds shows up in review
 3. `ManagedRuleset` is built by hand first, as planned (✅); `feat/rulesets-v7` moves its conversion to v7 later
 4. The first new kind generated end to end is a free, account-level resource: a D1 database or a Turnstile widget,
-   picked when that PR starts, after checking the Free-plan limits and the token permission
+   picked when that PR starts, after checking the Free-plan limits and the token permission. Picked 2026-10-15:
+   `D1Database` (see [its section](#branch-featd1-database-controller))
 
 **Sources (checked 2026-10-13):**
 - cloudflare-go v7.12.0 has an `api.md` in every package that maps each method to its verb and route, for example
@@ -1184,7 +1188,7 @@ kinds:
 | 3 | `feat/generator-types` | ✅ `generator/`: SDK loader, model, `generator.yaml`, types emitter, golden tests, `make codegen` (see the notes below the table) | KVNamespace's regenerated CRD matches the hand-written one, or differs only on purpose |
 | 4 | `feat/generator-openapi` | ✅ `kflare-gen sync-spec`, the committed subset, constraints and hints (see the notes below the table) | Golden tests: the constraints generated for KVNamespace, R2Bucket and IPList match their CRDs, or the entry says why not |
 | 5 | `feat/generator-controllers` | ✅ The controller emitter: descriptor, conversions, drift, RBAC, registration, protection, sample, envtest table (see the notes below the table) | KVNamespace is fully generated and its hand port deleted; its specs and the live e2e pass |
-| 6 | `feat/<kind>-controller` | The first new kind, generated end to end (decision 4) | Only its entry, any hooks and its live e2e spec are hand-written |
+| 6 | `feat/d1-database-controller` | ✅ `D1Database`, the first new kind, generated end to end (decision 4; see [its section](#branch-featd1-database-controller)) | Only its entry, any hooks and its live e2e spec are hand-written |
 | 7 | `feat/rulesets-v7` | The Rulesets foundation on v7: `Phases.Get`, `Rulesets.New` and `Rules.New/Edit/Delete` (with positions) replace the `Raw` calls in `pkg/cloudflare/rulesets.go`; the rule kinds' conversions move to v7 | Rule specs and the live e2e pass, with the rule delete checked live again (v0.119's fails) |
 | 8 | `feat/generator-rule-kinds` | A rule-kind emitter: the action parameters' types from v7's rule variants (`rulesets.RewriteRuleParam` and siblings) and the `definition` conversion, with `TransformRule` as its first kind | `TransformRule`'s live e2e passes. The other four Rules kinds follow, one PR each |
 
@@ -1250,6 +1254,14 @@ kinds:
   D1 databases and Turnstile widgets list another type than Get returns, so PR 6 starts there), Get, List or Delete
   params it does not set, and Update params it does not send. `TestGoldenControllerCompiles` type-checks the golden
   controller and table of a second kind in `internal/controller`
+- **The first generated kind as built** (`feat/d1-database-controller`, 2026-10-15): `D1Database` is its entry, its
+  live e2e spec and generated code; it needs no hook. Two changes to the shared machinery came with it. A kind's list
+  may hold another type than Get returns (D1's `DatabaseListResponse` against `D1`): `crudResourceKind` gained a
+  fourth type parameter, `L`, with `listedID` and `listedKey` in place of `objectKey`, and adoption now finds the
+  object in the list, then reads it by its ID (and creates one if it is gone by then). And an Update that takes
+  nothing kflare sends is dropped: D1's takes only `read_replication`, which the entry ignores, so the kind has no
+  Update and every field is immutable. Turnstile was not picked: its widgets need a list of domains, a secret that
+  belongs in a Kubernetes Secret, and names Cloudflare does not keep unique
 - `TransformRule` goes first because the dev token can already write its phases. Its immutable `spec.type` picks one
   of three phases, so the foundation's one phase per kind becomes a function of the spec
 - **Later:** a runtime for settings-style singletons (the shape of TunnelConfiguration and ManagedTransform; the 90
@@ -1271,6 +1283,44 @@ kinds:
   PR
 - Two SDKs share the binary for a while: two error families, classified alike since PR 1, and two retry setups, each
   kept at its SDK's defaults (see the v7 notes)
+
+
+#### Branch: `feat/d1-database-controller`
+**Depends on:** the code generator's PR 5 (`feat/generator-controllers`)
+**Status:** ✅ Complete
+
+A D1 database in an account: the code generator's PR 6, its first new kind generated end to end. Picked over a
+Turnstile widget on 2026-10-15: D1 is free (10 databases on Workers Free, 500 MB each, 5 GB in the account), the dev
+token already holds D1 Write, and it fits the shared CRUD reconciler with one change (see the generator's notes).
+
+- [x] Its entry in `generator/generator.yaml`: adopted by `name`; docs for `name`, the location hint and `version`;
+  `read_replication`, `created_at`, `file_size` and `num_tables` ignored, with reasons. kflare-gen writes the rest:
+  `spec.accountRef`, `name` (the spec's pattern), `jurisdiction` (`eu`, `fedramp` or `us`) and `primaryLocationHint`
+  (`wnam`, `enam`, `weur`, `eeur`, `apac` or `oc`), all immutable; `status.cloudflareMetadata.databaseID` and
+  `version`; the claim label `kflare.dev/d1-database-id` (`NameConflict` otherwise); the controller, its envtest
+  table and the sample. Short name `cfd1`
+- [x] Live e2e spec: a D1Database in the EU jurisdiction, checked through v7's D1 service; deleted with the retain
+  policy, which keeps the database; a new D1Database with the same name adopts it, found through the list; the
+  all-at-once deletion deletes it
+- [x] deploy.md (permission row, kinds table, uninstall, `NameConflict`), README, ARCHITECTURE.md
+
+**D1Database design notes (verified live on the dev account, 2026-10-15, with `kflare-probe-*` databases, each deleted
+afterwards):**
+- Names are unique in the account (a duplicate → 400, code 7502), so adoption by name is sound. The spec's pattern,
+  `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`, is what Cloudflare enforces (a dot, a leading hyphen or an empty name → 400, 7400);
+  capitals, underscores and 100 characters are accepted, and the spec gives no maximum, so the CRD gives none
+- An unknown or malformed database ID → 404, code 7404, for GET and DELETE. DELETE answers 200 with no result
+- The list takes `per_page` up to 10,000 (10,001 → 400, 7400), the spec's maximum, and returns an empty page past the
+  end. It shows name, ID, creation time, version, jurisdiction, table count and size, not the read replication
+- A new database reports `version: production`, `read_replication: {mode: disabled}`, 8,192 bytes and 0 tables.
+  `jurisdiction: eu` was accepted and reported by GET and the list; a location hint (`weur`) was accepted, and
+  Cloudflare reports only where the database runs (`running_in_region`, which v7's type lacks). Values outside either
+  enum → 400, 7400 (the error lists the location hints in capitals; lowercase ones are accepted)
+- No API renames a database or moves it: Update and Edit take only `read_replication`
+- The dev account holds a production database, `nhl-trade-tracker`: the e2e spec and its cleanup touch only databases
+  named `kflare-e2e-<run>`
+- Needs the account-level **D1: Edit** permission (the API's D1 Write); not yet checked on its own with a short-lived
+  token (see Token permissions)
 
 
 #### Release and CI
@@ -1402,10 +1452,10 @@ export CF_E2E_ZONE=kflare.dev               # zone for the DNS e2e specs; adopte
 
 ## Current Status
 
-> **Phases 1 and 2 complete. Phase 3 in progress: `KVNamespace`, `R2Bucket`, `WAFCustomRule`, `RateLimitRule`, `IPList`
-> and `ManagedRuleset` done.** cloudflare-go is at v0.119, with v7.12.0 next to it for the generated kinds; rule kinds
-> share the Rulesets foundation and controller; KVNamespace runs on v7 and the shared CRUD reconciler, and is generated
-> in full. The code generator, `kflare-gen`, is under way: next the first new generated kind (see Phase 3). Zero
-> Trust still waits on account setup. Items needing a paid plan, add-on or account setup are tracked under "Deferred:
-> paid plan, add-on or account setup" in Phase 3.
+> **Phases 1 and 2 complete. Phase 3 in progress: `KVNamespace`, `R2Bucket`, `WAFCustomRule`, `RateLimitRule`, `IPList`,
+> `ManagedRuleset` and `D1Database` done.** cloudflare-go is at v0.119, with v7.12.0 next to it for the generated kinds;
+> rule kinds share the Rulesets foundation and controller; KVNamespace and D1Database are generated in full, on v7 and
+> the shared CRUD reconciler. The code generator, `kflare-gen`, is under way: next `feat/rulesets-v7` (see Phase 3).
+> Zero Trust still waits on account setup. Items needing a paid plan, add-on or account setup are tracked under
+> "Deferred: paid plan, add-on or account setup" in Phase 3.
 > Last updated: October 2026

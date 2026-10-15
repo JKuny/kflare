@@ -37,12 +37,13 @@ Create an API token in the Cloudflare dashboard (**My Profile → API Tokens**, 
 | `WorkerRoute` | Zone · Workers Routes · Edit |
 | `KVNamespace` | Account · Workers KV Storage · Edit |
 | `R2Bucket` | Account · Workers R2 Storage · Edit |
+| `D1Database` | Account · D1 · Edit |
 | `WAFCustomRule`, `RateLimitRule`, `ManagedRuleset` | Zone · Zone WAF · Edit |
 | `IPList` | Account · Account Rule Lists · Edit |
 
 These are enough on their own: in October 2026 a token holding only them (with Zone · Zone · Read, and without
-Billing) ran kflare's full live test suite against an existing zone. Scope zone permissions to the zones kflare
-should manage. Note the account ID, shown on the account's overview page.
+Billing) ran kflare's full live test suite against an existing zone, before `D1Database` was added. Scope zone
+permissions to the zones kflare should manage. Note the account ID, shown on the account's overview page.
 
 ## 2. Install the chart
 
@@ -129,6 +130,7 @@ Every other kind references the account (or a resource that does). Examples are 
 | `WorkerRoute` | Namespaced | `zoneRef`, optional `workerScriptRef` (same namespace) | [route and exclusion](../config/samples/cloudflare_v1alpha1_workerroute.yaml) |
 | `KVNamespace` | Namespaced | `accountRef`; WorkerScripts bind it with `kvNamespaceRef` | [KV namespace](../config/samples/cloudflare_v1alpha1_kvnamespace.yaml) |
 | `R2Bucket` | Namespaced | `accountRef`; WorkerScripts bind it with `r2BucketRef` | [R2 bucket](../config/samples/cloudflare_v1alpha1_r2bucket.yaml) |
+| `D1Database` | Namespaced | `accountRef` | [D1 database](../config/samples/cloudflare_v1alpha1_d1database.yaml) |
 | `WAFCustomRule` | Namespaced | `zoneRef` (same namespace) | [block and skip rules](../config/samples/cloudflare_v1alpha1_wafcustomrule.yaml) |
 | `RateLimitRule` | Namespaced | `zoneRef` (same namespace) | [API rate limit](../config/samples/cloudflare_v1alpha1_ratelimitrule.yaml) |
 | `IPList` | Namespaced | `accountRef`; rule expressions use it as `$name` | [office addresses and a rule using them](../config/samples/cloudflare_v1alpha1_iplist.yaml) |
@@ -145,6 +147,9 @@ Things to know before pointing kflare at existing infrastructure:
   empty; until then it reports `BucketNotEmpty`. Use `retain` to keep a bucket and its objects.
 - **KV data.** Deleting a `KVNamespace` deletes the namespace and everything stored in it. Use `retain` on
   namespaces holding data you need.
+- **D1 data.** Deleting a `D1Database` deletes the database and everything stored in it. Use `retain` on
+  databases holding data you need. A database's name, jurisdiction and location hint are set when it is created
+  and cannot change. Free accounts can have 10 D1 databases.
 - **WAF custom rules.** Each `WAFCustomRule` manages one rule in its zone, which kflare marks with a ref
   derived from the resource's namespace and name. kflare never adopts or changes rules it did not create,
   and keeps its own rules in `spec.priority` order (lower first) while other rules keep their place. Free
@@ -251,7 +256,7 @@ Order matters, because kflare's finalizers need the controller running to clean 
    R2Bucket `retain`.
 
    ```sh
-   kubectl delete zones.kflare.dev,dnsrecords.kflare.dev,workerroutes.kflare.dev,wafcustomrules.kflare.dev,ratelimitrules.kflare.dev,managedrulesets.kflare.dev,iplists.kflare.dev,tunnels.kflare.dev,tunnelconfigurations.kflare.dev,workerscripts.kflare.dev,kvnamespaces.kflare.dev,r2buckets.kflare.dev --all -A
+   kubectl delete zones.kflare.dev,dnsrecords.kflare.dev,workerroutes.kflare.dev,wafcustomrules.kflare.dev,ratelimitrules.kflare.dev,managedrulesets.kflare.dev,iplists.kflare.dev,tunnels.kflare.dev,tunnelconfigurations.kflare.dev,workerscripts.kflare.dev,kvnamespaces.kflare.dev,r2buckets.kflare.dev,d1databases.kflare.dev --all -A
    kubectl delete cloudflareaccounts.kflare.dev --all
    ```
 
@@ -323,7 +328,7 @@ kubectl -n kflare-system logs deploy/kflare           # controller log (JSON)
 | `WorkerScriptNotFound`, `WorkerScriptNotReady`, `AccountMismatch` | The route's WorkerScript is missing, not uploaded yet, or in a different account than the zone | Check the WorkerScript; it must use the zone's account |
 | `TitleConflict` | Another `KVNamespace` already manages a namespace with this title | Keep one KVNamespace per title |
 | `KVNamespaceNotFound`, `KVNamespaceNotReady` | A WorkerScript's `kvNamespaceRef` names a missing or not-yet-ready KVNamespace | Check the KVNamespace; it must use the Worker's account |
-| `NameConflict` | Another `R2Bucket` already manages a bucket with this name in the same Cloudflare account, another `IPList` a list with this name, or the account has a list of another kind with this name | Keep one R2Bucket per bucket and one IPList per list; list names are unique across list kinds |
+| `NameConflict` | Another `R2Bucket` already manages a bucket with this name in the same Cloudflare account, another `IPList` a list with this name, another `D1Database` a database with this name, or the account has a list of another kind with this name | Keep one R2Bucket per bucket, one IPList per list and one D1Database per database; list names are unique across list kinds |
 | `R2BucketNotFound`, `R2BucketNotReady` | A WorkerScript's `r2BucketRef` names a missing or not-yet-ready R2Bucket | Check the R2Bucket; it must use the Worker's account |
 | `ReplacingItems` | Cloudflare is replacing an `IPList`'s items in the background | Nothing: kflare checks again every 2 seconds |
 | `RulesetConflict` | Another rule in the zone already deploys the `ManagedRuleset`'s managed ruleset: another ManagedRuleset, or a rule made in the dashboard or the API | Keep one ManagedRuleset per ruleset and zone, or delete the other rule; kflare checks again every minute |

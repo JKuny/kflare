@@ -1,0 +1,209 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: d1databases.kflare.dev
+spec:
+  group: kflare.dev
+  names:
+    kind: D1Database
+    listKind: D1DatabaseList
+    plural: d1databases
+    shortNames:
+    - cfd1
+    singular: d1database
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.name
+      name: Name
+      type: string
+    - jsonPath: .status.cloudflareMetadata.databaseID
+      name: Database ID
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          D1Database is the Schema for the d1databases API.
+          It represents a Cloudflare D1 database. Deleting it deletes the
+          database and all of its data, unless the retain deletion policy is set.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: D1DatabaseSpec defines the desired state of D1Database.
+            properties:
+              accountRef:
+                description: |-
+                  AccountRef references the CloudflareAccount that owns the D1 database.
+                  Immutable after creation.
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+                x-kubernetes-validations:
+                - message: accountRef is immutable
+                  rule: self == oldSelf
+              jurisdiction:
+                description: |-
+                  Specify the location to restrict the D1 database to run and store data. If this
+                  option is present, the location hint is ignored.
+                enum:
+                - eu
+                - fedramp
+                - us
+                type: string
+                x-kubernetes-validations:
+                - message: jurisdiction is immutable
+                  rule: self == oldSelf
+              name:
+                description: |-
+                  Name is the database's name in Cloudflare, unique within the
+                  account. It cannot change.
+                pattern: ^[a-zA-Z0-9][a-zA-Z0-9_-]*$
+                type: string
+                x-kubernetes-validations:
+                - message: name is immutable
+                  rule: self == oldSelf
+              primaryLocationHint:
+                description: |-
+                  PrimaryLocationHint asks Cloudflare to create the database's primary
+                  in this region, if it is available there; without it, Cloudflare
+                  picks a region close to kflare's manager. Cloudflare does not report
+                  it back, so it takes effect only when kflare creates the database.
+                enum:
+                - wnam
+                - enam
+                - weur
+                - eeur
+                - apac
+                - oc
+                type: string
+                x-kubernetes-validations:
+                - message: primaryLocationHint is immutable
+                  rule: self == oldSelf
+            required:
+            - accountRef
+            - name
+            type: object
+            x-kubernetes-validations:
+            - message: jurisdiction is immutable
+              rule: has(self.jurisdiction) == has(oldSelf.jurisdiction)
+            - message: primaryLocationHint is immutable
+              rule: has(self.primaryLocationHint) == has(oldSelf.primaryLocationHint)
+          status:
+            description: D1DatabaseStatus defines the observed state of D1Database.
+            properties:
+              cloudflareMetadata:
+                description: CloudflareMetadata holds identifiers and metadata returned
+                  by the Cloudflare API.
+                properties:
+                  databaseID:
+                    description: |-
+                      DatabaseID is the D1 database's identifier, which a Worker's D1
+                      binding names.
+                    type: string
+                  version:
+                    description: Version is the D1 backend the database runs on, such
+                      as production.
+                    type: string
+                type: object
+              conditions:
+                description: Conditions represent the latest available observations
+                  of the D1 database state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

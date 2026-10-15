@@ -38,9 +38,10 @@ import (
 
 // crudResourceKind is what the shared CRUD reconciler needs to know about a
 // kind. O is the kind's API type, A the narrow interface to the
-// cloudflare-go v7 service it calls, and R the Cloudflare object that service
-// returns.
-type crudResourceKind[O conditionedObject, A any, R any] struct {
+// cloudflare-go v7 service it calls, R the Cloudflare object that service
+// returns, and L the object as a page of its list shows it: R itself for a
+// KV namespace, a shorter type for a D1 database.
+type crudResourceKind[O conditionedObject, A any, R any, L any] struct {
 	// name is the kind's name, and noun what messages call its Cloudflare
 	// object, as in "KVNamespace" and "KV namespace".
 	name, noun string
@@ -61,16 +62,18 @@ type crudResourceKind[O conditionedObject, A any, R any] struct {
 	statusID func(O) string
 	observe  func(O, *R)
 
-	// id returns an object's ID, objectKey its key, and matches whether the
-	// object is what a resource's spec asks for.
+	// id returns an object's ID, and matches whether the object is what a
+	// resource's spec asks for. listedID and listedKey return the ID and the
+	// key of an object a page of the list shows.
 	id        func(*R) string
-	objectKey func(*R) string
 	matches   func(O, *R) bool
+	listedID  func(*L) string
+	listedKey func(*L) string
 
 	// The kind's calls to Cloudflare, in the account accountID. list returns
 	// one page of the account's objects, counting from 1.
 	get    func(ctx context.Context, api A, accountID, id string) (*R, error)
-	list   func(ctx context.Context, api A, accountID string, page int64) (*pagination.V4PagePaginationArray[R], error)
+	list   func(ctx context.Context, api A, accountID string, page int64) (*pagination.V4PagePaginationArray[L], error)
 	create func(ctx context.Context, api A, accountID string, obj O) (*R, error)
 	update func(ctx context.Context, api A, accountID, id string, obj O) (*R, error)
 	delete func(ctx context.Context, api A, accountID, id string) error
@@ -82,13 +85,13 @@ type crudResourceKind[O conditionedObject, A any, R any] struct {
 
 // crudResourceReconciler reconciles the resources of one CRUD kind. Each
 // kind's exported reconciler delegates to one.
-type crudResourceReconciler[O conditionedObject, A any, R any] struct {
+type crudResourceReconciler[O conditionedObject, A any, R any, L any] struct {
 	client.Client
-	kind   crudResourceKind[O, A, R]
+	kind   crudResourceKind[O, A, R, L]
 	newAPI func(token string) (A, error)
 }
 
-func (r *crudResourceReconciler[O, A, R]) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *crudResourceReconciler[O, A, R, L]) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	obj := r.kind.newObject()
@@ -126,7 +129,7 @@ func (r *crudResourceReconciler[O, A, R]) reconcile(ctx context.Context, req ctr
 }
 
 // sync drives the desired→observed→delta→reconcile loop for one resource.
-func (r *crudResourceReconciler[O, A, R]) sync(ctx context.Context, obj O, accountID string, api A) (ctrl.Result, error) {
+func (r *crudResourceReconciler[O, A, R, L]) sync(ctx context.Context, obj O, accountID string, api A) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	k := r.kind
 
@@ -146,29 +149,40 @@ func (r *crudResourceReconciler[O, A, R]) sync(ctx context.Context, obj O, accou
 	}
 
 	// No object yet: adopt the account's object with this key, unless another
-	// resource of the kind claims it, or create one.
+	// resource of the kind claims it, or create one. An object found in the
+	// list is read by its ID, for all that the list leaves out.
 	if current == nil {
 		key := k.key(obj)
-		existing, err := findInPages(func(page int64) (*pagination.V4PagePaginationArray[R], error) {
+		existing, err := findInPages(func(page int64) (*pagination.V4PagePaginationArray[L], error) {
 			return k.list(ctx, api, accountID, page)
-		}, func(object *R) bool { return k.objectKey(object) == key })
+		}, func(listed *L) bool { return k.listedKey(listed) == key })
 		if err != nil {
 			return handleCloudflareError(ctx, r.Client, obj, err)
 		}
 		if existing != nil {
+			id := k.listedID(existing)
 			claimed, err := claimedIDs(ctx, r.Client, k.newList(), k.claimLabel, obj)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
-			if owner, taken := claimed[k.id(existing)]; taken {
+			if owner, taken := claimed[id]; taken {
 				return notReadyRetryAfter(ctx, r.Client, obj, &conditionError{
 					Reason:  k.conflictReason,
 					Message: fmt.Sprintf("%s %q is already managed by %s %s", k.noun, key, k.name, owner),
 				})
 			}
-			current = existing
-			logger.Info("Adopted existing "+k.noun, "key", key, "id", k.id(current))
-		} else {
+			adopted, err := k.get(ctx, api, accountID, id)
+			switch {
+			case cfpkg.IsNotFound(err):
+				logger.Info(k.noun+" deleted since it was listed, creating one", "key", key, "id", id)
+			case err != nil:
+				return handleCloudflareError(ctx, r.Client, obj, err)
+			default:
+				current = adopted
+				logger.Info("Adopted existing "+k.noun, "key", key, "id", id)
+			}
+		}
+		if current == nil {
 			current, err = k.create(ctx, api, accountID, obj)
 			if err != nil {
 				return handleCloudflareError(ctx, r.Client, obj, err)
@@ -223,7 +237,7 @@ func findInPages[R any](
 // reconcileDelete handles the deletion lifecycle. Once nothing depends on the
 // resource, it deletes the object from Cloudflare (unless the retain policy is
 // set), then removes the finalizer.
-func (r *crudResourceReconciler[O, A, R]) reconcileDelete(ctx context.Context, obj O) (ctrl.Result, error) {
+func (r *crudResourceReconciler[O, A, R, L]) reconcileDelete(ctx context.Context, obj O) (ctrl.Result, error) {
 	// Safety check: if the finalizer is already gone, there is nothing to do.
 	if !controllerutil.ContainsFinalizer(obj, reconciler.Finalizer) {
 		return ctrl.Result{}, nil
@@ -260,7 +274,7 @@ func (r *crudResourceReconciler[O, A, R]) reconcileDelete(ctx context.Context, o
 // watches CloudflareAccounts, so a resource waiting for its account is
 // reconciled once the account is ready, and the deletion of the kind's
 // dependents, so a resource waiting for them is released once they are gone.
-func (r *crudResourceReconciler[O, A, R]) setup(mgr ctrl.Manager, rec reconcile.Reconciler) error {
+func (r *crudResourceReconciler[O, A, R, L]) setup(mgr ctrl.Manager, rec reconcile.Reconciler) error {
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(r.kind.newObject()).
 		Watches(&cloudflarev1alpha1.CloudflareAccount{}, handler.EnqueueRequestsFromMapFunc(r.resourcesForAccount))
@@ -273,7 +287,7 @@ func (r *crudResourceReconciler[O, A, R]) setup(mgr ctrl.Manager, rec reconcile.
 
 // resourcesForAccount maps a CloudflareAccount event to the kind's resources
 // that use it.
-func (r *crudResourceReconciler[O, A, R]) resourcesForAccount(ctx context.Context, account client.Object) []reconcile.Request {
+func (r *crudResourceReconciler[O, A, R, L]) resourcesForAccount(ctx context.Context, account client.Object) []reconcile.Request {
 	list := r.kind.newList()
 	if err := r.List(ctx, list); err != nil {
 		return nil
@@ -293,7 +307,7 @@ func (r *crudResourceReconciler[O, A, R]) resourcesForAccount(ctx context.Contex
 
 // deletingResourcesOf maps the deletion of a dependent to the kind's resources
 // it uses that are themselves being deleted.
-func (r *crudResourceReconciler[O, A, R]) deletingResourcesOf(ctx context.Context, dependent client.Object) []reconcile.Request {
+func (r *crudResourceReconciler[O, A, R, L]) deletingResourcesOf(ctx context.Context, dependent client.Object) []reconcile.Request {
 	return deletingParentOf(ctx, r.Client, dependent, func() client.Object { return r.kind.newObject() }, true,
 		r.kind.dependents)
 }

@@ -68,7 +68,7 @@ type KVNamespaceReconciler struct {
 // waits for the WorkerScripts that use it before it is deleted: Cloudflare
 // deletes a namespace a Worker is bound to, but every later upload of that
 // Worker then fails.
-var kvNamespaceKind = crudResourceKind[*cloudflarev1alpha1.KVNamespace, KVNamespaceAPI, kv.Namespace]{
+var kvNamespaceKind = crudResourceKind[*cloudflarev1alpha1.KVNamespace, KVNamespaceAPI, kv.Namespace, kv.Namespace]{
 	name:      "KVNamespace",
 	noun:      "KV namespace",
 	newObject: func() *cloudflarev1alpha1.KVNamespace { return &cloudflarev1alpha1.KVNamespace{} },
@@ -85,11 +85,12 @@ var kvNamespaceKind = crudResourceKind[*cloudflarev1alpha1.KVNamespace, KVNamesp
 		obj.Status.CloudflareMetadata.NamespaceID = current.ID
 	},
 
-	id:        func(current *kv.Namespace) string { return current.ID },
-	objectKey: func(current *kv.Namespace) string { return current.Title },
+	id: func(current *kv.Namespace) string { return current.ID },
 	matches: func(obj *cloudflarev1alpha1.KVNamespace, current *kv.Namespace) bool {
 		return current.Title == obj.Spec.Title
 	},
+	listedID:  func(listed *kv.Namespace) string { return listed.ID },
+	listedKey: func(listed *kv.Namespace) string { return listed.Title },
 
 	get: func(ctx context.Context, api KVNamespaceAPI, accountID, id string) (*kv.Namespace, error) {
 		var params kv.NamespaceGetParams
@@ -151,12 +152,12 @@ func (r *KVNamespaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // crud returns the shared CRUD reconciler for KVNamespaces, with the injected
 // factory or the production one.
-func (r *KVNamespaceReconciler) crud() *crudResourceReconciler[*cloudflarev1alpha1.KVNamespace, KVNamespaceAPI, kv.Namespace] {
+func (r *KVNamespaceReconciler) crud() *crudResourceReconciler[*cloudflarev1alpha1.KVNamespace, KVNamespaceAPI, kv.Namespace, kv.Namespace] {
 	newAPI := r.NewKVNamespaceAPI
 	if newAPI == nil {
 		newAPI = defaultKVNamespaceAPI
 	}
-	return &crudResourceReconciler[*cloudflarev1alpha1.KVNamespace, KVNamespaceAPI, kv.Namespace]{
+	return &crudResourceReconciler[*cloudflarev1alpha1.KVNamespace, KVNamespaceAPI, kv.Namespace, kv.Namespace]{
 		Client: r.Client, kind: kvNamespaceKind, newAPI: newAPI,
 	}
 }
