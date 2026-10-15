@@ -10,7 +10,7 @@ import (
 	"context"
 	"slices"
 
-	cf "github.com/cloudflare/cloudflare-go"
+	"github.com/cloudflare/cloudflare-go/v7/rulesets"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,10 +41,10 @@ type WAFCustomRuleReconciler struct {
 // wafCustomRuleKind describes WAFCustomRule to the shared rule reconciler.
 var wafCustomRuleKind = rulesetRuleKind{
 	name:      "WAFCustomRule",
-	phase:     string(cf.RulesetPhaseHTTPRequestFirewallCustom),
+	phase:     rulesets.PhaseHTTPRequestFirewallCustom,
 	newObject: func() rulesetRuleObject { return &cloudflarev1alpha1.WAFCustomRule{} },
 	newList:   func() client.ObjectList { return &cloudflarev1alpha1.WAFCustomRuleList{} },
-	definition: func(obj rulesetRuleObject) cf.RulesetRule {
+	definition: func(obj rulesetRuleObject) rulesets.RulesetNewParamsRule {
 		return wafCustomRuleDefinition(obj.(*cloudflarev1alpha1.WAFCustomRule))
 	},
 }
@@ -72,40 +72,41 @@ func (r *WAFCustomRuleReconciler) rules() *rulesetRuleReconciler {
 // wafCustomRuleDefinition is the Cloudflare rule a WAFCustomRule asks for.
 // Cloudflare keeps the skipped phases and products in the order it is sent
 // them, so they are sorted: reordering them in the spec changes nothing.
-func wafCustomRuleDefinition(rule *cloudflarev1alpha1.WAFCustomRule) cf.RulesetRule {
+func wafCustomRuleDefinition(rule *cloudflarev1alpha1.WAFCustomRule) rulesets.RulesetNewParamsRule {
 	spec := rule.Spec
-	definition := cf.RulesetRule{
-		Action:      spec.Action,
-		Expression:  spec.Expression,
-		Description: spec.Description,
-		Enabled:     cf.BoolPtr(spec.Enabled == nil || *spec.Enabled),
-	}
+	definition := rulesetRuleDefinition(rulesets.RulesetNewParamsRulesAction(spec.Action), spec.RulesetRuleSpec)
 	if skip := spec.Skip; skip != nil {
-		params := &cf.RulesetRuleActionParameters{}
+		var params rulesets.SkipRuleActionParametersParam
 		if skip.RemainingRules {
-			params.Ruleset = "current"
+			params.Ruleset.Value, params.Ruleset.Present = rulesets.SkipRuleActionParametersRulesetCurrent, true
 		}
-		for _, phase := range skip.Phases {
-			params.Phases = append(params.Phases, string(phase))
+		if len(skip.Phases) > 0 {
+			phases := make([]rulesets.Phase, 0, len(skip.Phases))
+			for _, phase := range skip.Phases {
+				phases = append(phases, rulesets.Phase(phase))
+			}
+			slices.Sort(phases)
+			params.Phases.Value, params.Phases.Present = phases, true
 		}
-		for _, product := range skip.Products {
-			params.Products = append(params.Products, string(product))
+		if len(skip.Products) > 0 {
+			products := make([]rulesets.SkipRuleActionParametersProduct, 0, len(skip.Products))
+			for _, product := range skip.Products {
+				products = append(products, rulesets.SkipRuleActionParametersProduct(product))
+			}
+			slices.Sort(products)
+			params.Products.Value, params.Products.Present = products, true
 		}
-		slices.Sort(params.Phases)
-		slices.Sort(params.Products)
-		definition.ActionParameters = params
+		definition.ActionParameters.Value, definition.ActionParameters.Present = params, true
 		// Only a skip rule may set logging (Cloudflare refuses it on other
 		// actions, code 20018).
-		definition.Logging = &cf.RulesetRuleLogging{Enabled: cf.BoolPtr(skip.Log == nil || *skip.Log)}
+		var logging rulesets.LoggingParam
+		logging.Enabled.Value, logging.Enabled.Present = skip.Log == nil || *skip.Log, true
+		definition.Logging.Value, definition.Logging.Present = logging, true
 	}
 	if response := spec.BlockResponse; response != nil {
-		definition.ActionParameters = &cf.RulesetRuleActionParameters{
-			Response: &cf.RulesetRuleActionParametersBlockResponse{
-				StatusCode:  uint16(response.StatusCode),
-				ContentType: response.ContentType,
-				Content:     response.Content,
-			},
-		}
+		definition.ActionParameters.Value = blockResponseParameters(response.StatusCode, response.ContentType,
+			response.Content)
+		definition.ActionParameters.Present = true
 	}
 	return definition
 }

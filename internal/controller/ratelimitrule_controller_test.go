@@ -10,7 +10,6 @@ import (
 	"context"
 	"strings"
 
-	cf "github.com/cloudflare/cloudflare-go"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -79,8 +78,8 @@ var _ = Describe("RateLimitRule Controller", func() {
 		Expect(result.IsZero()).To(BeTrue())
 	}
 	// cloudflareRule is the rule fake Cloudflare holds for the resource at k.
-	cloudflareRule := func(k types.NamespacedName) cf.RulesetRule {
-		rule, ok := ruleWithRef(fake.entrypointIn(phase).Rules, rulesetRuleRef("RateLimitRule", k.Namespace, k.Name))
+	cloudflareRule := func(k types.NamespacedName) fakeRule {
+		rule, ok := fake.entrypointIn(phase).rule(rulesetRuleRef("RateLimitRule", k.Namespace, k.Name))
 		Expect(ok).To(BeTrue(), "Cloudflare has no rule for %s", k)
 		return rule
 	}
@@ -91,7 +90,7 @@ var _ = Describe("RateLimitRule Controller", func() {
 			Client: k8sClient,
 			Scheme: k8sClient.Scheme(),
 			NewRulesetRuleAPI: func(string) (RulesetRuleAPI, error) {
-				return fake, nil
+				return fake.api(), nil
 			},
 		}
 	})
@@ -137,23 +136,19 @@ var _ = Describe("RateLimitRule Controller", func() {
 			createRule("a", nil)
 			reconcileRule(key("a"))
 
-			Expect(fake.rulesets).NotTo(HaveKey(rulesTestPhase), "the WAF custom rules are left alone")
+			Expect(fake.entrypoints).NotTo(HaveKey(rulesTestPhase), "the WAF custom rules are left alone")
 			rule := cloudflareRule(key("a"))
-			Expect(rule.Action).To(Equal("block"))
-			Expect(rule.Expression).To(Equal(`http.request.uri.path eq "/a"`))
-			Expect(*rule.Enabled).To(BeTrue())
-			Expect(rule.RateLimit).To(Equal(&cf.RulesetRuleRateLimit{
-				Characteristics:   []string{"cf.colo.id", "ip.src"},
-				Period:            10,
-				RequestsPerPeriod: 5,
-				MitigationTimeout: 10,
-			}))
-			Expect(rule.ActionParameters).To(BeNil())
+			Expect(rule).To(HaveKeyWithValue("action", "block"))
+			Expect(rule).To(HaveKeyWithValue("expression", `http.request.uri.path eq "/a"`))
+			Expect(rule).To(HaveKeyWithValue("enabled", true))
+			Expect(rule.jsonOf("ratelimit")).To(MatchJSON(
+				`{"characteristics":["cf.colo.id","ip.src"],"period":10,"requests_per_period":5,"mitigation_timeout":10}`))
+			Expect(rule).NotTo(HaveKey("action_parameters"))
 
 			Expect(getRule(key("a")).Status.CloudflareMetadata).To(Equal(cloudflarev1alpha1.RulesetRuleCloudflareMetadata{
 				ZoneID:    rulesTestZone,
-				RulesetID: fake.entrypointIn(phase).ID,
-				RuleID:    rule.ID,
+				RulesetID: fake.entrypointIn(phase).id,
+				RuleID:    rule.id(),
 				Ref:       rulesetRuleRef("RateLimitRule", ns, "a"),
 				Version:   "1",
 			}))
@@ -178,10 +173,14 @@ var _ = Describe("RateLimitRule Controller", func() {
 			})
 			reconcileRule(key("a"))
 			rule := cloudflareRule(key("a"))
-			Expect(rule.RateLimit.Characteristics).To(Equal([]string{
-				"cf.colo.id", `http.request.headers["x-api-key"]`, "ip.src",
-			}))
-			Expect(rule.ActionParameters.Response.StatusCode).To(BeEquivalentTo(429))
+			Expect(rule.jsonOf("ratelimit")).To(MatchJSON(`{
+				"characteristics": ["cf.colo.id", "http.request.headers[\"x-api-key\"]", "ip.src"],
+				"period": 60, "requests_per_period": 5, "mitigation_timeout": 600,
+				"counting_expression": "http.request.uri.path eq \"/a\" and http.response.code eq 401",
+				"requests_to_origin": true
+			}`))
+			Expect(rule.jsonOf("action_parameters")).To(MatchJSON(
+				`{"response":{"status_code":429,"content_type":"application/json","content":"{\"error\":\"slow down\"}"}}`))
 
 			writes := fake.writes
 			reconcileRule(key("a"))
@@ -191,14 +190,15 @@ var _ = Describe("RateLimitRule Controller", func() {
 		It("updates the rule in place when the spec changes", func() {
 			createRule("a", nil)
 			reconcileRule(key("a"))
-			ruleID := cloudflareRule(key("a")).ID
+			ruleID := cloudflareRule(key("a")).id()
 
 			rule := getRule(key("a"))
 			rule.Spec.RequestsPerPeriod = 50
 			Expect(k8sClient.Update(ctx, rule)).To(Succeed())
 			reconcileRule(key("a"))
-			Expect(cloudflareRule(key("a")).ID).To(Equal(ruleID))
-			Expect(cloudflareRule(key("a")).RateLimit.RequestsPerPeriod).To(Equal(50))
+			Expect(cloudflareRule(key("a")).id()).To(Equal(ruleID))
+			Expect(cloudflareRule(key("a")).jsonOf("ratelimit")).To(MatchJSON(
+				`{"characteristics":["cf.colo.id","ip.src"],"period":10,"requests_per_period":50,"mitigation_timeout":10}`))
 			Expect(getRule(key("a")).Status.CloudflareMetadata.Version).To(Equal("2"))
 		})
 
@@ -215,15 +215,15 @@ var _ = Describe("RateLimitRule Controller", func() {
 			})
 			waf := &WAFCustomRuleReconciler{
 				Client:            k8sClient,
-				NewRulesetRuleAPI: func(string) (RulesetRuleAPI, error) { return fake, nil },
+				NewRulesetRuleAPI: func(string) (RulesetRuleAPI, error) { return fake.api(), nil },
 			}
 			_, err := waf.Reconcile(ctx, reconcile.Request{NamespacedName: key("a")})
 			Expect(err).NotTo(HaveOccurred())
 			reconcileRule(key("a"))
 
-			Expect(fake.entrypointIn(phase).Rules).To(HaveLen(1))
-			Expect(fake.entrypoint().Rules).To(HaveLen(1))
-			Expect(fake.entrypoint().Rules[0].Ref).To(Equal(rulesetRuleRef("WAFCustomRule", ns, "a")))
+			Expect(fake.entrypointIn(phase).rules).To(HaveLen(1))
+			Expect(fake.entrypoint().rules).To(HaveLen(1))
+			Expect(fake.entrypoint().rules[0].ref()).To(Equal(rulesetRuleRef("WAFCustomRule", ns, "a")))
 			peers, err := r.rules().peers(ctx, rulesTestZone)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(peers).To(ConsistOf(rulesetRulePeer{
@@ -237,7 +237,7 @@ var _ = Describe("RateLimitRule Controller", func() {
 			reconcileRule(key("a"))
 			Expect(k8sClient.Delete(ctx, getRule(key("a")))).To(Succeed())
 			reconcileRule(key("a"))
-			Expect(fake.entrypointIn(phase).Rules).To(BeEmpty())
+			Expect(fake.entrypointIn(phase).rules).To(BeEmpty())
 			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key("a"), &cloudflarev1alpha1.RateLimitRule{}))).To(BeTrue())
 		})
 	})

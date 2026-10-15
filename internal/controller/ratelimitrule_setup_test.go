@@ -7,7 +7,8 @@ SPDX-License-Identifier: MIT
 package controller
 
 import (
-	cf "github.com/cloudflare/cloudflare-go"
+	"encoding/json"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -30,10 +31,9 @@ var _ = Describe("RateLimitRuleReconciler SetupWithManager", func() {
 })
 
 var _ = DescribeTable("the Cloudflare rule a RateLimitRule asks for",
-	func(spec cloudflarev1alpha1.RateLimitRuleSpec, want cf.RulesetRule) {
-		spec.Expression = `http.request.uri.path eq "/a"`
-		want.Expression = spec.Expression
-		Expect(rateLimitRuleDefinition(&cloudflarev1alpha1.RateLimitRule{Spec: spec})).To(Equal(want))
+	func(spec cloudflarev1alpha1.RateLimitRuleSpec, want string) {
+		spec.Expression = "true"
+		Expect(json.Marshal(rateLimitRuleDefinition(&cloudflarev1alpha1.RateLimitRule{Spec: spec}))).To(MatchJSON(want))
 	},
 	Entry("the defaults: counted per IP address and data center, blocked for the period",
 		cloudflarev1alpha1.RateLimitRuleSpec{
@@ -42,13 +42,9 @@ var _ = DescribeTable("the Cloudflare rule a RateLimitRule asks for",
 			Period:            10,
 			RequestsPerPeriod: 5,
 		},
-		cf.RulesetRule{
-			Action:  "block",
-			Enabled: cf.BoolPtr(true),
-			RateLimit: &cf.RulesetRuleRateLimit{
-				Characteristics: []string{"cf.colo.id", "ip.src"}, Period: 10, RequestsPerPeriod: 5, MitigationTimeout: 10,
-			},
-		}),
+		`{"action":"block","expression":"true","enabled":true,
+		  "ratelimit":{"characteristics":["cf.colo.id","ip.src"],"period":10,"requests_per_period":5,
+		               "mitigation_timeout":10}}`),
 	Entry("characteristics sorted after cf.colo.id, which is sent once",
 		cloudflarev1alpha1.RateLimitRuleSpec{
 			Action: "block",
@@ -58,18 +54,13 @@ var _ = DescribeTable("the Cloudflare rule a RateLimitRule asks for",
 			Period:            10,
 			RequestsPerPeriod: 5,
 		},
-		cf.RulesetRule{
-			Action:  "block",
-			Enabled: cf.BoolPtr(true),
-			RateLimit: &cf.RulesetRuleRateLimit{
-				Characteristics: []string{"cf.colo.id", `http.request.headers["x-api-key"]`, "ip.src"},
-				Period:          10, RequestsPerPeriod: 5, MitigationTimeout: 10,
-			},
-		}),
+		`{"action":"block","expression":"true","enabled":true,
+		  "ratelimit":{"characteristics":["cf.colo.id","http.request.headers[\"x-api-key\"]","ip.src"],
+		               "period":10,"requests_per_period":5,"mitigation_timeout":10}}`),
 	Entry("a disabled challenge with a longer timeout, its own counting expression, counting origin requests",
 		cloudflarev1alpha1.RateLimitRuleSpec{
 			RulesetRuleSpec: cloudflarev1alpha1.RulesetRuleSpec{
-				Description: "limit /a", Enabled: cf.BoolPtr(false),
+				Description: "limit /a", Enabled: new(false),
 			},
 			Action:             "managed_challenge",
 			Characteristics:    []cloudflarev1alpha1.RateLimitRuleCharacteristic{"ip.src"},
@@ -79,16 +70,11 @@ var _ = DescribeTable("the Cloudflare rule a RateLimitRule asks for",
 			CountingExpression: `http.response.code eq 401`,
 			RequestsToOrigin:   true,
 		},
-		cf.RulesetRule{
-			Action:      "managed_challenge",
-			Description: "limit /a",
-			Enabled:     cf.BoolPtr(false),
-			RateLimit: &cf.RulesetRuleRateLimit{
-				Characteristics: []string{"cf.colo.id", "ip.src"}, Period: 60, RequestsPerPeriod: 100,
-				MitigationTimeout: 3600, CountingExpression: `http.response.code eq 401`, RequestsToOrigin: true,
-			},
-		}),
-	Entry("throttling, with a mitigation timeout of 0",
+		`{"action":"managed_challenge","expression":"true","description":"limit /a","enabled":false,
+		  "ratelimit":{"characteristics":["cf.colo.id","ip.src"],"period":60,"requests_per_period":100,
+		               "mitigation_timeout":3600,"counting_expression":"http.response.code eq 401",
+		               "requests_to_origin":true}}`),
+	Entry("throttling, with a mitigation timeout of 0, which is left out",
 		cloudflarev1alpha1.RateLimitRuleSpec{
 			Action:            "block",
 			Characteristics:   []cloudflarev1alpha1.RateLimitRuleCharacteristic{"ip.src"},
@@ -96,13 +82,8 @@ var _ = DescribeTable("the Cloudflare rule a RateLimitRule asks for",
 			RequestsPerPeriod: 5,
 			MitigationTimeout: new(int32(0)),
 		},
-		cf.RulesetRule{
-			Action:  "block",
-			Enabled: cf.BoolPtr(true),
-			RateLimit: &cf.RulesetRuleRateLimit{
-				Characteristics: []string{"cf.colo.id", "ip.src"}, Period: 10, RequestsPerPeriod: 5,
-			},
-		}),
+		`{"action":"block","expression":"true","enabled":true,
+		  "ratelimit":{"characteristics":["cf.colo.id","ip.src"],"period":10,"requests_per_period":5}}`),
 	Entry("a block with a custom response",
 		cloudflarev1alpha1.RateLimitRuleSpec{
 			Action:            "block",
@@ -113,16 +94,9 @@ var _ = DescribeTable("the Cloudflare rule a RateLimitRule asks for",
 				StatusCode: 429, ContentType: "application/json", Content: `{"error":"slow down"}`,
 			},
 		},
-		cf.RulesetRule{
-			Action:  "block",
-			Enabled: cf.BoolPtr(true),
-			ActionParameters: &cf.RulesetRuleActionParameters{
-				Response: &cf.RulesetRuleActionParametersBlockResponse{
-					StatusCode: 429, ContentType: "application/json", Content: `{"error":"slow down"}`,
-				},
-			},
-			RateLimit: &cf.RulesetRuleRateLimit{
-				Characteristics: []string{"cf.colo.id", "ip.src"}, Period: 10, RequestsPerPeriod: 5, MitigationTimeout: 10,
-			},
-		}),
+		`{"action":"block","expression":"true","enabled":true,
+		  "action_parameters":{"response":{"status_code":429,"content_type":"application/json",
+		                                   "content":"{\"error\":\"slow down\"}"}},
+		  "ratelimit":{"characteristics":["cf.colo.id","ip.src"],"period":10,"requests_per_period":5,
+		               "mitigation_timeout":10}}`),
 )

@@ -11,7 +11,6 @@ import (
 	"errors"
 	"strings"
 
-	cf "github.com/cloudflare/cloudflare-go"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -122,17 +121,17 @@ var _ = Describe("WAFCustomRule Controller", func() {
 		return r.Reconcile(ctx, reconcile.Request{NamespacedName: k})
 	}
 	// cloudflareRule is the rule fake Cloudflare holds for the resource at k.
-	cloudflareRule := func(k types.NamespacedName) cf.RulesetRule {
-		rule, ok := ruleWithRef(fake.entrypoint().Rules, rulesetRuleRef("WAFCustomRule", k.Namespace, k.Name))
+	cloudflareRule := func(k types.NamespacedName) fakeRule {
+		rule, ok := fake.entrypoint().rule(rulesetRuleRef("WAFCustomRule", k.Namespace, k.Name))
 		Expect(ok).To(BeTrue(), "Cloudflare has no rule for %s", k)
 		return rule
 	}
 	// order lists the resources whose rules fake Cloudflare holds, in order.
 	order := func() []string {
 		var names []string
-		for _, rule := range fake.entrypoint().Rules {
+		for _, rule := range fake.entrypoint().rules {
 			for _, k := range []types.NamespacedName{key("a"), key("b"), {Name: "c", Namespace: otherNS}} {
-				if rule.Ref == rulesetRuleRef("WAFCustomRule", k.Namespace, k.Name) {
+				if rule.ref() == rulesetRuleRef("WAFCustomRule", k.Namespace, k.Name) {
 					names = append(names, k.Name)
 				}
 			}
@@ -146,7 +145,7 @@ var _ = Describe("WAFCustomRule Controller", func() {
 			Client: k8sClient,
 			Scheme: k8sClient.Scheme(),
 			NewRulesetRuleAPI: func(string) (RulesetRuleAPI, error) {
-				return fake, nil
+				return fake.api(), nil
 			},
 		}
 	})
@@ -220,7 +219,7 @@ var _ = Describe("WAFCustomRule Controller", func() {
 		It("reports InvalidToken when no Cloudflare client can be built", func() {
 			readyEnv()
 			createRule(ns, "a", nil)
-			r.NewRulesetRuleAPI = func(string) (RulesetRuleAPI, error) { return nil, errors.New("bad token") }
+			r.NewRulesetRuleAPI = func(string) (RulesetRuleAPI, error) { return RulesetRuleAPI{}, errors.New("bad token") }
 			_, err := reconcileRule(key("a"))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(readyCondition(key("a")).Reason).To(Equal("InvalidToken"))
@@ -234,15 +233,15 @@ var _ = Describe("WAFCustomRule Controller", func() {
 			Expect(result.IsZero()).To(BeTrue())
 
 			rule := cloudflareRule(key("a"))
-			Expect(rule.Action).To(Equal("block"))
-			Expect(rule.Expression).To(Equal(`http.request.uri.path eq "/a"`))
-			Expect(rule.Description).To(Equal("block /a"))
-			Expect(*rule.Enabled).To(BeTrue())
+			Expect(rule).To(HaveKeyWithValue("action", "block"))
+			Expect(rule).To(HaveKeyWithValue("expression", `http.request.uri.path eq "/a"`))
+			Expect(rule).To(HaveKeyWithValue("description", "block /a"))
+			Expect(rule).To(HaveKeyWithValue("enabled", true))
 
 			Expect(getRule(key("a")).Status.CloudflareMetadata).To(Equal(cloudflarev1alpha1.RulesetRuleCloudflareMetadata{
 				ZoneID:    rulesTestZone,
-				RulesetID: fake.entrypoint().ID,
-				RuleID:    rule.ID,
+				RulesetID: fake.entrypoint().id,
+				RuleID:    rule.id(),
 				Ref:       rulesetRuleRef("WAFCustomRule", ns, "a"),
 				Version:   "1",
 			}))
@@ -269,18 +268,17 @@ var _ = Describe("WAFCustomRule Controller", func() {
 					RemainingRules: true,
 					Phases:         []cloudflarev1alpha1.WAFCustomRuleSkipPhase{"http_request_sbfm", "http_ratelimit"},
 					Products:       []cloudflarev1alpha1.WAFCustomRuleSkipProduct{"waf", "bic"},
-					Log:            cf.BoolPtr(false),
+					Log:            new(false),
 				}
 			})
 			_, err := reconcileRule(key("a"))
 			Expect(err).NotTo(HaveOccurred())
 
 			rule := cloudflareRule(key("a"))
-			Expect(rule.Action).To(Equal("skip"))
-			Expect(rule.ActionParameters.Ruleset).To(Equal("current"))
-			Expect(rule.ActionParameters.Phases).To(Equal([]string{"http_ratelimit", "http_request_sbfm"}))
-			Expect(rule.ActionParameters.Products).To(Equal([]string{"bic", "waf"}))
-			Expect(*rule.Logging.Enabled).To(BeFalse())
+			Expect(rule).To(HaveKeyWithValue("action", "skip"))
+			Expect(rule.jsonOf("action_parameters")).To(MatchJSON(
+				`{"ruleset":"current","phases":["http_ratelimit","http_request_sbfm"],"products":["bic","waf"]}`))
+			Expect(rule.jsonOf("logging")).To(MatchJSON(`{"enabled":false}`))
 
 			writes := fake.writes
 			_, err = reconcileRule(key("a"))
@@ -293,16 +291,16 @@ var _ = Describe("WAFCustomRule Controller", func() {
 			createRule(ns, "a", nil)
 			_, err := reconcileRule(key("a"))
 			Expect(err).NotTo(HaveOccurred())
-			ruleID := cloudflareRule(key("a")).ID
-			for i := range fake.entrypoint().Rules {
-				fake.entrypoint().Rules[i].Action = "managed_challenge"
+			ruleID := cloudflareRule(key("a")).id()
+			for _, rule := range fake.entrypoint().rules {
+				rule["action"] = "managed_challenge"
 			}
 
 			_, err = reconcileRule(key("a"))
 			Expect(err).NotTo(HaveOccurred())
 			rule := cloudflareRule(key("a"))
-			Expect(rule.ID).To(Equal(ruleID))
-			Expect(rule.Action).To(Equal("block"))
+			Expect(rule.id()).To(Equal(ruleID))
+			Expect(rule).To(HaveKeyWithValue("action", "block"))
 			Expect(getRule(key("a")).Status.CloudflareMetadata.Version).To(Equal("2"))
 		})
 
@@ -313,11 +311,11 @@ var _ = Describe("WAFCustomRule Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			rule := getRule(key("a"))
-			rule.Spec.Enabled = cf.BoolPtr(false)
+			rule.Spec.Enabled = new(false)
 			Expect(k8sClient.Update(ctx, rule)).To(Succeed())
 			_, err = reconcileRule(key("a"))
 			Expect(err).NotTo(HaveOccurred())
-			Expect(*cloudflareRule(key("a")).Enabled).To(BeFalse())
+			Expect(cloudflareRule(key("a"))).To(HaveKeyWithValue("enabled", false))
 		})
 
 		It("keeps the rules of every namespace sharing the zone in priority order", func() {
@@ -358,7 +356,7 @@ var _ = Describe("WAFCustomRule Controller", func() {
 		It("returns retryable errors for back-off", func() {
 			readyEnv()
 			createRule(ns, "a", nil)
-			fake.errs["GetEntrypointRuleset"] = errors.New("connection reset")
+			fake.errs["Phases.Get"] = errors.New("connection reset")
 			_, err := reconcileRule(key("a"))
 			Expect(err).To(MatchError("connection reset"))
 			Expect(readyCondition(key("a")).Reason).To(Equal("APIError"))
@@ -387,7 +385,7 @@ var _ = Describe("WAFCustomRule Controller", func() {
 			syncedRule(nil)
 			_, err := reconcileRule(key("a"))
 			Expect(err).NotTo(HaveOccurred())
-			Expect(fake.entrypoint().Rules).To(BeEmpty())
+			Expect(fake.entrypoint().rules).To(BeEmpty())
 			expectGone()
 		})
 
@@ -395,7 +393,7 @@ var _ = Describe("WAFCustomRule Controller", func() {
 			syncedRule(map[string]string{reconciler.DeletionPolicyAnnotation: reconciler.DeletionPolicyRetain})
 			_, err := reconcileRule(key("a"))
 			Expect(err).NotTo(HaveOccurred())
-			Expect(fake.entrypoint().Rules).To(HaveLen(1))
+			Expect(fake.entrypoint().rules).To(HaveLen(1))
 			expectGone()
 		})
 
@@ -406,7 +404,7 @@ var _ = Describe("WAFCustomRule Controller", func() {
 			Expect(k8sClient.Status().Update(ctx, rule)).To(Succeed())
 			_, err := reconcileRule(key("a"))
 			Expect(err).NotTo(HaveOccurred())
-			Expect(fake.entrypoint().Rules).To(BeEmpty())
+			Expect(fake.entrypoint().rules).To(BeEmpty())
 			expectGone()
 		})
 
@@ -415,7 +413,7 @@ var _ = Describe("WAFCustomRule Controller", func() {
 			forceDelete(ctx, &cloudflarev1alpha1.Zone{}, key(zoneCRName))
 			_, err := reconcileRule(key("a"))
 			Expect(err).NotTo(HaveOccurred())
-			Expect(fake.entrypoint().Rules).To(HaveLen(1))
+			Expect(fake.entrypoint().rules).To(HaveLen(1))
 			expectGone()
 		})
 
@@ -432,7 +430,7 @@ var _ = Describe("WAFCustomRule Controller", func() {
 
 		It("keeps the finalizer when Cloudflare fails, so deletion is retried", func() {
 			syncedRule(nil)
-			fake.errs["DeleteRulesetRule"] = errors.New("unavailable")
+			fake.errs["Rules.Delete"] = errors.New("unavailable")
 			_, err := reconcileRule(key("a"))
 			Expect(err).To(MatchError("unavailable"))
 			Expect(getRule(key("a")).Finalizers).To(ContainElement(reconciler.Finalizer))
@@ -440,7 +438,7 @@ var _ = Describe("WAFCustomRule Controller", func() {
 
 		It("keeps the finalizer when the credentials cannot be resolved or used", func() {
 			syncedRule(nil)
-			r.NewRulesetRuleAPI = func(string) (RulesetRuleAPI, error) { return nil, errors.New("bad token") }
+			r.NewRulesetRuleAPI = func(string) (RulesetRuleAPI, error) { return RulesetRuleAPI{}, errors.New("bad token") }
 			_, err := reconcileRule(key("a"))
 			Expect(err).To(MatchError("bad token"))
 

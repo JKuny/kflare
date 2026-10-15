@@ -9,7 +9,6 @@ package controller
 import (
 	"context"
 
-	cf "github.com/cloudflare/cloudflare-go"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -83,13 +82,13 @@ var _ = Describe("ManagedRuleset Controller", func() {
 		Expect(result.IsZero()).To(BeTrue())
 	}
 	// cloudflareRule is the rule fake Cloudflare holds for the resource at k.
-	cloudflareRule := func(k types.NamespacedName) cf.RulesetRule {
-		rule, ok := ruleWithRef(fake.entrypointIn(managedPhase).Rules, rulesetRuleRef("ManagedRuleset", k.Namespace, k.Name))
+	cloudflareRule := func(k types.NamespacedName) fakeRule {
+		rule, ok := fake.entrypointIn(managedPhase).rule(rulesetRuleRef("ManagedRuleset", k.Namespace, k.Name))
 		Expect(ok).To(BeTrue(), "Cloudflare has no rule for %s", k)
 		return rule
 	}
 	hasEntrypoint := func() bool {
-		_, ok := fake.rulesets[managedPhase]
+		_, ok := fake.entrypoints[managedPhase]
 		return ok
 	}
 
@@ -99,7 +98,7 @@ var _ = Describe("ManagedRuleset Controller", func() {
 			Client: k8sClient,
 			Scheme: k8sClient.Scheme(),
 			NewRulesetRuleAPI: func(string) (RulesetRuleAPI, error) {
-				return fake, nil
+				return fake.api(), nil
 			},
 		}
 	})
@@ -145,19 +144,17 @@ var _ = Describe("ManagedRuleset Controller", func() {
 			createDeployment("free", nil)
 			reconcileDeployment(key("free"))
 
-			Expect(fake.rulesets).To(HaveLen(1), "the zone's other phases are left alone")
+			Expect(fake.entrypoints).To(HaveLen(1), "the zone's other phases are left alone")
 			rule := cloudflareRule(key("free"))
-			Expect(rule.Action).To(Equal("execute"))
-			Expect(rule.Expression).To(Equal("true"))
-			Expect(*rule.Enabled).To(BeTrue())
-			Expect(rule.ActionParameters.ID).To(Equal(freeManagedRulesetID))
-			Expect(*rule.ActionParameters.Version).To(Equal("latest"))
-			Expect(rule.ActionParameters.Overrides).To(BeNil())
+			Expect(rule).To(HaveKeyWithValue("action", "execute"))
+			Expect(rule).To(HaveKeyWithValue("expression", "true"))
+			Expect(rule).To(HaveKeyWithValue("enabled", true))
+			Expect(rule.jsonOf("action_parameters")).To(MatchJSON(`{"id":"` + freeManagedRulesetID + `","version":"latest"}`))
 
 			Expect(getDeployment(key("free")).Status.CloudflareMetadata).To(Equal(cloudflarev1alpha1.RulesetRuleCloudflareMetadata{
 				ZoneID:    rulesTestZone,
-				RulesetID: fake.entrypointIn(managedPhase).ID,
-				RuleID:    rule.ID,
+				RulesetID: fake.entrypointIn(managedPhase).id,
+				RuleID:    rule.id(),
 				Ref:       rulesetRuleRef("ManagedRuleset", ns, "free"),
 				Version:   "1",
 			}))
@@ -183,9 +180,17 @@ var _ = Describe("ManagedRuleset Controller", func() {
 				}
 			})
 			reconcileDeployment(key("free"))
-			overrides := cloudflareRule(key("free")).ActionParameters.Overrides
-			Expect(overrides.Categories[0].Category).To(Equal("log4j"))
-			Expect(overrides.Rules[0].ID).To(Equal("7dfd111a6bad4b86bf3522cce6c5792f"))
+			Expect(cloudflareRule(key("free")).jsonOf("action_parameters")).To(MatchJSON(`{
+				"id": "` + freeManagedRulesetID + `", "version": "latest",
+				"overrides": {
+					"enabled": true, "action": "managed_challenge",
+					"categories": [{"category": "log4j", "action": "block"}, {"category": "wordpress", "enabled": false}],
+					"rules": [
+						{"id": "7dfd111a6bad4b86bf3522cce6c5792f", "enabled": false},
+						{"id": "9f7e454e4cad45abbcc40696037f70df", "action": "log"}
+					]
+				}
+			}`))
 
 			writes := fake.writes
 			reconcileDeployment(key("free"))
@@ -195,7 +200,7 @@ var _ = Describe("ManagedRuleset Controller", func() {
 		It("updates the rule in place when the overrides change", func() {
 			createDeployment("free", nil)
 			reconcileDeployment(key("free"))
-			ruleID := cloudflareRule(key("free")).ID
+			ruleID := cloudflareRule(key("free")).id()
 
 			deployment := getDeployment(key("free"))
 			deployment.Spec.Overrides = &cloudflarev1alpha1.ManagedRulesetOverrides{
@@ -206,10 +211,9 @@ var _ = Describe("ManagedRuleset Controller", func() {
 			Expect(k8sClient.Update(ctx, deployment)).To(Succeed())
 			reconcileDeployment(key("free"))
 			rule := cloudflareRule(key("free"))
-			Expect(rule.ID).To(Equal(ruleID))
-			Expect(rule.ActionParameters.Overrides.Rules).To(Equal([]cf.RulesetRuleActionParametersRules{
-				{ID: "b453c8ace3a54e0ab7c791510b51dc4d", Enabled: new(false)},
-			}))
+			Expect(rule.id()).To(Equal(ruleID))
+			Expect(rule.jsonOf("action_parameters")).To(MatchJSON(`{"id": "` + freeManagedRulesetID + `", "version": "latest",
+				"overrides": {"rules": [{"id": "b453c8ace3a54e0ab7c791510b51dc4d", "enabled": false}]}}`))
 			Expect(getDeployment(key("free")).Status.CloudflareMetadata.Version).To(Equal("2"))
 		})
 
@@ -223,13 +227,13 @@ var _ = Describe("ManagedRuleset Controller", func() {
 			ready := meta.FindStatusCondition(getDeployment(key("free")).Status.Conditions, cloudflarev1alpha1.ConditionReady)
 			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 			Expect(ready.Reason).To(Equal("RulesetConflict"))
-			Expect(ready.Message).To(ContainSubstring("Cloudflare refused the rule"))
-			Expect(refs(fake.entrypointIn(managedPhase).Rules)).To(Equal([]string{"someone-else"}))
+			Expect(ready.Message).To(Equal("Cloudflare refused the rule: refused by the fake (20014)"))
+			Expect(refs(fake.entrypointIn(managedPhase).rules)).To(Equal([]string{"someone-else"}))
 
 			By("writing the rule once the other deployment is gone")
-			fake.entrypointIn(managedPhase).Rules = nil
+			fake.entrypointIn(managedPhase).rules = nil
 			reconcileDeployment(key("free"))
-			Expect(cloudflareRule(key("free")).ActionParameters.ID).To(Equal(freeManagedRulesetID))
+			Expect(executes(cloudflareRule(key("free")))).To(Equal(freeManagedRulesetID))
 		})
 
 		It("deletes its rule and the entry point it empties, which brings back Cloudflare's default", func() {
@@ -251,10 +255,10 @@ var _ = Describe("ManagedRuleset Controller", func() {
 
 			Expect(k8sClient.Delete(ctx, getDeployment(key("free")))).To(Succeed())
 			reconcileDeployment(key("free"))
-			Expect(fake.entrypointIn(managedPhase).Rules).To(BeEmpty())
+			Expect(fake.entrypointIn(managedPhase).rules).To(BeEmpty())
 
 			reconcileDeployment(key("managed"))
-			Expect(cloudflareRule(key("managed")).ActionParameters.ID).To(Equal(managedRulesetID))
+			Expect(executes(cloudflareRule(key("managed")))).To(Equal(managedRulesetID))
 		})
 
 		It("re-triggers the deployments that may have lost their rule when one is deleted", func() {
