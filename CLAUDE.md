@@ -99,7 +99,8 @@ With:
 │                          #   its CLAUDE.md holds the generator's design
 ├── hack/                  # sync-helm-chart.sh, chartannotations (Artifact Hub annotations), releasenotes (a
 │                          #   GitHub release's notes), crdcompat (breaking CRD changes since the last release),
-│                          #   mutate.sh (mutations), e2e-live.sh (live e2e), license header
+│                          #   supportedreleases (the releases that get fixes, for the release scan), mutate.sh
+│                          #   (mutations), e2e-live.sh (live e2e), license header
 ├── docs/deploy.md         # Deploy guide (Helm install, accounts, upgrade, uninstall, troubleshooting)
 ├── docs/design-notes.md   # What was decided and verified live, per phase and kind
 ├── ARCHITECTURE.md        # How the controllers behave: drift, adoption, errors, deletion, known limitations
@@ -845,7 +846,8 @@ Cross-cutting, from ARCHITECTURE.md's known limitations:
   round-trip property for the generated conversions, is left for later
 - [x] Branch-Protection (3 on `bf97313`, a score of 8), 2026-10-28: `main` has two rulesets. `protect main`, which no
   one bypasses, also requires CI's checks from GitHub Actions, by name (`Build & Test`, `Test (newest Kubernetes)`,
-  both `E2E Tests` jobs, `review`), on a branch up to date with `main`. `require reviews` asks for two approvals, one
+  both `E2E Tests` jobs, `review`, and since 2026-11-06 `Upgrade from the last release (Kubernetes v1.37.0)`), on a
+  branch up to date with `main`. `require reviews` asks for two approvals, one
   a code owner's (`.github/CODEOWNERS`), a new one after the last push, and dismisses stale ones; the repository
   admin role bypasses it on a pull request (the merge box's "bypass rules"). Scorecard v5.6.0 scores this 9. 10
   needs no bypass actor in any ruleset (it reads one as "doesn't apply to admins"), and one maintainer, who can't
@@ -991,7 +993,7 @@ Cross-cutting, from ARCHITECTURE.md's known limitations:
   - E2E: the job `Upgrade from the last release (Kubernetes v1.37.0)` on pull requests and pushes; Live E2E: a step
     after the suite in the live job, as a job of its own would join the `e2e-cloudflare` group, which keeps one pending
     job and cancels the one before. Tag release waits for every E2E job, so a release is tagged only once it passes.
-    Not required by `protect main`: the user's call
+    Not required by `protect main` at first, the user's call; required since 2026-11-06, at the user's request
   - Checked on an envtest API server (1.34.1, no pods): v0.4.2's chart from GHCR takes the suite's values, the 21
     resources apply to its CRDs with strict validation, and after `helm upgrade` the served CRDs are
     `config/crd/bases`; the reapply and the dry-run create pass. With `spec.comment` removed from DNSRecord's CRD, the
@@ -1022,6 +1024,44 @@ Cross-cutting, from ARCHITECTURE.md's known limitations:
     passed (E2E run 42258172292: the suite's 28 specs, then the upgrade's 9). Without them, the upgrade job's name
     needs no matrix. A review without `/live-e2e` still makes one skipped `Live E2E` check: no trigger filters a
     review's body
+- [ ] Release branches ([#157](https://github.com/JonathanGraniero/kflare/issues/157), `ci/release-branches`), before
+  v0.5.0: #87's policy gives the minor release before the latest three months of security fixes, as patch releases
+  from its `release-0.Y` branch, which CI, the release scan and branch protection did not cover
+  - CI and the dependency review run on pull requests to `release-*` and on pushes to them, and E2E on pushes too. A
+    branch runs the workflows its own files hold, so a release branch runs its tag's CI, and its upgrade job and
+    `make crd-compat` compare with the newest tag in its history, the minor release's newest patch. v0.4.2's
+    workflows run CI on `main` only: the user chose, on 2026-11-08, a v0.4.3 from `main` once this merges and before
+    anything breaking lands (`main` has no product change since v0.4.2), so that `release-0.4` is cut from it
+  - `release-scan.yml` is a matrix from `hack/supportedreleases`: the published releases (drafts, prereleases and
+    tags other than vX.Y.Z left out), the latest by version, and the newest patch of the minor before it until three
+    months after the latest minor's first published release (`AddDate`, so November 30 runs to March 2), none before
+    v0.4. Categories `release-image` and `release-image-previous-minor`; once a window ends, the second keeps its last
+    report until the next minor's. 38 of 38 mutations caught
+  - `release.yml`'s first step refuses a tag whose commit is in the history of neither `main` nor `release-X.Y` (the
+    compare API: `identical` or `behind`), and one on `main` that is older than the newest tag, the likeliest
+    backport mistake; the draft gets `--target <branch>`. Every release so far recorded `main`, and Scorecard's
+    Branch-Protection reads only branches a release names, so it reads `release-0.4` once a release comes from it
+    (cert-manager's releases show that GitHub stores a target given for an existing tag)
+  - Rulesets, applied 2026-11-08 at the user's OK through `gh api`: `protect release branches` (id 26821783) has
+    `protect main`'s rules and its 6 required checks on `refs/heads/release-*`, with `do_not_enforce_on_create`, since
+    a tag's commit never has the `review` check; `require reviews` (26086768) also includes `release-*`. One ruleset
+    for release branches rather than `release-*` in `protect main`: the checks' names hold Kubernetes versions, which
+    a release branch keeps from its tag while `main`'s change. Two release branches whose checks are named otherwise
+    need a ruleset each. Rollback: delete 26821783, drop `release-*` from 26086768
+  - Checked: `hack/supportedreleases`' tests, and the command on the live releases (v0.4.2 alone today; with a v0.5.0
+    page added, v0.4.2 too until 2027-04-10 and not after). Release's new step, taken from the YAML and run against this
+    repository with only "not published" faked: a tag on `main`, one in a release branch's history, one on neither, and
+    one on `main` older than a newer tag faked in. A dry run on 2026-11-08, the user's OK: `release-0.4-dryrun` pushed
+    from the branch's head, which the ruleset let through; a direct push to it was refused ("Changes must be made
+    through a pull request", "6 of 6 required status checks are expected"), and so was its deletion ("Cannot delete this
+    branch"). Draft PR #161 against it, a fix cherry-picked with `-x` and a 0.4.3 bump, ran the six required checks,
+    each `isRequired`, and stayed `BLOCKED` until they passed, then on `require reviews`' approvals, as `main` does. Its
+    CRD check said "No breaking change to the CRDs since v0.4.2", and its upgrade job installed v0.4.2's chart and
+    passed 8 of 8. CodeQL's default setup ran no analysis on #161, only on pull requests to `main`, which SECURITY.md
+    now says. #161 was closed unmerged and both branches deleted, the ruleset's exclude set for the delete and then
+    restored. Not run: a force-push to the branch (the auto mode classifier refused it), actionlint and shellcheck, and
+    a release from a branch, which v0.4's first backport makes
+  - Left: the merge, then v0.4.3 from `main` (the first release through Tag release), after which #157 can close
 - [ ] Open question: a Terraform `infra/` root for `kflare.dev` (zone, CI token, GitHub secrets)
 
 ---
