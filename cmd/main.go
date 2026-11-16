@@ -73,6 +73,7 @@ func main() {
 	var maxConcurrentReconciles int
 	var leaderElectionID string
 	var watchNamespaces string
+	var secretNamespaces string
 	var watchSelector string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -86,6 +87,11 @@ func main() {
 		"The namespaces whose kflare resources this installation manages, separated by commas: it neither watches "+
 			"nor caches anything in other namespaces, Secrets included. It manages a CloudflareAccount only if the "+
 			"account's token Secret is in one of them. Empty manages every namespace.")
+	flag.StringVar(&secretNamespaces, "secret-namespaces", "",
+		"The namespaces where this installation reads and writes Secrets, separated by commas: an account's token "+
+			"Secret, a Tunnel's credentials Secret and a WorkerScript's secret bindings must be in one of them, and "+
+			"it caches no other Secret. Its permissions on Secrets can then be Roles in those namespaces. Empty uses "+
+			"Secrets in every namespace it watches.")
 	flag.StringVar(&watchSelector, "watch-selector", "",
 		"A label selector, such as kflare.dev/instance=team-a, that the kflare resources and CloudflareAccounts this "+
 			"installation manages must match: it leaves the others alone, their finalizers included. Empty manages "+
@@ -164,6 +170,8 @@ func main() {
 	exitOnError(err, "unable to create a Kubernetes client")
 	scope, err := controller.NewWatchScope(watchNamespaces, watchSelector, apiReader)
 	exitOnError(err, "invalid --watch-namespaces or --watch-selector")
+	scope, err = scope.WithSecretNamespaces(secretNamespaces)
+	exitOnError(err, "invalid --secret-namespaces")
 	setupLog.Info("managing kflare resources", "scope", scope.String())
 
 	// HTTP/2 stays off unless --enable-http2: the Stream Cancellation and Rapid
