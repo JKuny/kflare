@@ -932,8 +932,10 @@ crds:
   reconcile the resources they share for a few seconds. To keep one leader throughout, set `leaderElectionID` to
   `a634e97e.kflare.dev`.
 - **Their scopes must not overlap.** Installations that share namespaces need selectors that no labels match both:
-  kflare cannot tell, and both would reconcile what both select. An installation without `watchNamespaces` or
-  `watchSelector` manages everything, so it cannot share a cluster with another.
+  kflare cannot tell, and both reconcile what both select. With one Cloudflare account behind both, that still makes
+  one object, which either deletes with the resource, but each writes the resource's status and calls Cloudflare for
+  it. An installation without `watchNamespaces` or `watchSelector` manages everything, so it cannot share a cluster
+  with another.
 - **Each keeps its own rate limit budgets.** Installations whose accounts use the same token, or tokens of one
   Cloudflare user, share Cloudflare's limit for it: split `cloudflareRateLimit` between them (see
   [Cloudflare's API rate limit](#cloudflares-api-rate-limit)), or give each installation its own account API token.
@@ -946,9 +948,10 @@ crds:
   does not manage records a Warning Event with reason `OtherKflareRules`. Give each installation its own zones.
 - **A resource moves to another installation with its finalizer**, when its labels change, or the installations'
   scopes do: the installation that now selects it carries on, its deletion included. One that no installation selects
-  keeps its finalizer, so deleting it waits until one does. Move a parent, a `Zone` or a `Tunnel`, together with what uses it: a
-  resource being deleted whose parent is outside its installation's scope is released, its Cloudflare object left as
-  it is, with a Warning Event with reason `NotWatched`.
+  keeps its finalizer, so deleting it waits until one does. Move a parent, a `Zone` or a `Tunnel`, together with what
+  uses it, and the `CloudflareAccount` too: a resource being deleted whose account or parent is outside its
+  installation's scope is released, its Cloudflare object left as it is, with a Warning Event with reason
+  `NotWatched`. Label it back into the installation that can use its account to have the object deleted with it.
 - **Metrics are each installation's own**: `kflare_resources` counts what it manages.
 
 ## Security model
@@ -1782,8 +1785,9 @@ configures its zone's settings, and does not keep a managed one from configuring
 4. Remove the annotation, or set it to `manage`. kflare then manages the object as one it adopted, with no
    `adoption-policy` needed: it changes nothing while the object matches, corrects it from then on, and keeps it when
    the resource is deleted unless `kflare.dev/deletion-policy: delete` says otherwise. If another resource already
-   manages the object, this one reports its kind's conflict reason, such as `NameConflict`, and leaves it alone.
-   Switch a Zone before its records: a managed record waits for a Zone that still reports `DriftDetected`
+   manages the object, this one reports its kind's conflict reason, such as `NameConflict`, and leaves it alone,
+   when deleted too. Switch a Zone before its records: a managed record waits for a Zone that still reports
+   `DriftDetected`
 
 **Auditing** that Cloudflare matches git: install a release with `observeOnly: true`. It observes every resource,
 whatever its annotation says, and never writes to Cloudflare, so its API token needs only the read permissions of the

@@ -62,6 +62,13 @@ does. Two things follow from the Zone being the grant:
   does not allow. An object a resource finds, adopts or creates is found by its spec's hostname, which the Zone
   already allowed
 
+The same goes for any resource being deleted that does not claim, in both its status and its claim label, the object
+it would delete: a reconcile that failed before it wrote status leaves the object in the claim label alone, and so may
+a person, and an observed resource switched to `manage` keeps in status an object another resource manages (see
+[Observing a resource](#observing-a-resource)). kflare deletes that object only when no other resource claims it, and
+otherwise leaves it with a Warning Event of the kind's conflict reason, so that someone who may edit resources in one
+namespace cannot have kflare delete an object a resource elsewhere manages.
+
 Such a resource follows its Zone, in whichever namespace, and its own namespace's labels through watches. A Zone being
 deleted waits for the resources in other namespaces that it allows, as for those in its own; one it does not allow has
 no call to make through it, and does not hold it back, which any namespace could otherwise do to any Zone.
@@ -288,7 +295,8 @@ keeps them on deletion; settings it configured itself before it was observed sta
   policy is `manage`, the resource reads the object by the ID in status, claims it and corrects it, with no adoption
   policy asked for, and keeps it on deletion as an adopted object (see [Deletion](#deletion)). It first holds its key
   and looks for another resource's claim on the object, as a resource that adopts does: if one manages it, the
-  resource reports the kind's conflict reason and claims nothing. A resource that created its object and is then
+  resource reports the kind's conflict reason and claims nothing, and its deletion leaves the object, whatever its
+  deletion policy. A resource that created its object and is then
   observed is not marked, nor is one observed while it was creating its object (`kflare.dev/creating`), so the
   object is still deleted with it once it is managed again.
 
@@ -897,7 +905,8 @@ a token Secret in a namespace where the installation may no longer use Secrets, 
   resource still never takes over what another installation created: it reports `AlreadyExists`, naming the
   `CloudflareAccount` the other may use. With the annotation, though, two installations can each manage one object or
   one zone's settings, and each orders only its own rules in a phase, with a Warning Event (`OtherKflareRules`) where
-  their rules share one. Overlapping scopes are not detected: both installations reconcile what both select.
+  their rules share one. Overlapping scopes are not detected: both installations reconcile what both select, which
+  through one Cloudflare account still makes one object.
 - **Two kinds are pinned to the legacy SDK.** Zone and WorkerScript call cloudflare-go v0.119, the newest of the v0
   line; every other kind uses the generated SDK, v7. A limitation comes from v0.119: a WorkerScript binds only R2
   buckets in the default jurisdiction (`R2BucketJurisdictionUnsupported` otherwise): the SDK's Worker R2 binding has
